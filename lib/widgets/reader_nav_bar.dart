@@ -1,0 +1,135 @@
+import 'package:flutter/material.dart';
+
+import '../theme/app_theme.dart';
+
+/// App-owned navigation chrome — always visible in Reader.
+class ReaderNavBar extends StatelessWidget {
+  const ReaderNavBar({
+    super.key,
+    required this.hasPrev,
+    required this.hasNext,
+    required this.hasToc,
+    required this.onPrev,
+    required this.onNext,
+    required this.onToc,
+    this.busy = false,
+  });
+
+  final bool hasPrev;
+  final bool hasNext;
+  final bool hasToc;
+  final VoidCallback onPrev;
+  final VoidCallback onNext;
+  final VoidCallback onToc;
+  final bool busy;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: AppTheme.surface,
+      elevation: 0,
+      child: SafeArea(
+        top: false,
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+          decoration: const BoxDecoration(
+            border: Border(top: BorderSide(color: AppTheme.border)),
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                child: _NavButton(
+                  icon: Icons.chevron_left_rounded,
+                  label: 'Prev',
+                  enabled: hasPrev && !busy,
+                  onTap: onPrev,
+                ),
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                child: _NavButton(
+                  icon: Icons.list_alt_rounded,
+                  label: 'TOC',
+                  enabled: hasToc && !busy,
+                  onTap: onToc,
+                ),
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                child: _NavButton(
+                  icon: Icons.chevron_right_rounded,
+                  label: 'Next',
+                  enabled: hasNext && !busy,
+                  onTap: onNext,
+                  emphasized: hasNext && !busy,
+                  iconTrailing: true,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _NavButton extends StatelessWidget {
+  const _NavButton({
+    required this.icon,
+    required this.label,
+    required this.enabled,
+    required this.onTap,
+    this.iconTrailing = false,
+    this.emphasized = false,
+  });
+
+  final IconData icon;
+  final String label;
+  final bool enabled;
+  final VoidCallback onTap;
+  final bool iconTrailing;
+  final bool emphasized;
+
+  @override
+  Widget build(BuildContext context) {
+    final bg = !enabled
+        ? AppTheme.surfaceAlt.withValues(alpha: 0.4)
+        : emphasized
+            ? AppTheme.accentSoft
+            : AppTheme.surfaceAlt;
+    final fg = !enabled
+        ? AppTheme.textSecondary.withValues(alpha: 0.45)
+        : emphasized
+            ? AppTheme.accent
+            : AppTheme.textPrimary;
+
+    return Material(
+      color: bg,
+      borderRadius: BorderRadius.circular(12),
+      child: InkWell(
+        onTap: enabled ? onTap : null,
+        borderRadius: BorderRadius.circular(12),
+        child: SizedBox(
+          height: 48,
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              if (!iconTrailing) Icon(icon, size: 22, color: fg),
+              if (!iconTrailing) const SizedBox(width: 2),
+              Text(
+                label,
+                style: TextStyle(
+                  color: fg,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 14,
+                ),
+              ),
+              if (iconTrailing) const SizedBox(width: 2),
+              if (iconTrailing) Icon(icon, size: 22, color: fg),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}

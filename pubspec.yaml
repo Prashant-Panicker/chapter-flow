@@ -1,0 +1,35 @@
+name: chapterflow
+description: ChapterFlow — site-aware novel reader with owned Prev/TOC/Next chrome and continuous English translation.
+publish_to: 'none'
+version: 0.2.1
+
+environment:
+  # withValues(), CardThemeData/TabBarThemeData normalization, and other
+  # APIs used here landed in Flutter 3.27 / Dart 3.6. Build with Flutter
+  # 3.27+ (any current stable release, e.g. 3.4x, satisfies this).
+  sdk: '>=3.6.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_inappwebview: ^6.0.0
+  dio: ^5.4.0
+  flutter_secure_storage: ^10.0.0
+  # hive/hive_flutter (hivedb.dev) are unmaintained and their pubspec sdk
+  # upper-bound predates Dart 3, so `flutter pub get` fails to resolve them
+  # against any current Flutter SDK. hive_ce / hive_ce_flutter is the
+  # actively maintained, API-compatible fork (same classes, only the
+  # import path changes) — see services/storage_service.dart and
+  # models/chapter.dart.
+  hive_ce: ^2.0.0
+  hive_ce_flutter: ^2.0.0
+  shared_preferences: ^2.2.2
+  path_provider: ^2.1.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true
