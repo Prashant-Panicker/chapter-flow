@@ -127,6 +127,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
             : 'Translation cancelled.',
       );
     } on TranslationChunkFailure catch (e) {
+      if (!mounted) return;
       final retry = await showDialog<bool>(
         context: context,
         builder: (ctx) => AlertDialog(

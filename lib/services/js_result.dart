@@ -22,7 +22,7 @@ Map<String, dynamic> parseExtractResult(dynamic raw) {
     if (value is! String) {
       value = value.toString();
     }
-    var s = (value as String).trim();
+    final String s = value.trim();
     if (s.isEmpty || s == 'null' || s == 'undefined') {
       throw const FormatException('Empty extract result from page');
     }

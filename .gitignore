@@ -31,6 +31,14 @@ buildlog/
 .packages
 .metadata
 
+# Build outputs
+*.apk
+*.aab
+*.ipa
+android/app/release/
+android/app/debug/
+android/app/profile/
+
 # Symbolication related
 app.*.symbols
 
