@@ -24,7 +24,18 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           channel: stable
-          flutter-version: '3.27.0'
+          flutter-version: '3.44.8'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: |
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Configure Flutter Android SDK
+        run: flutter config --android-sdk "$ANDROID_SDK_ROOT"
 
       - name: Install dependencies
         run: flutter pub get
