@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:convert';
+
 import 'package:dio/dio.dart';
 
 class TranslationCancelledException implements Exception {
@@ -40,8 +43,9 @@ class TranslationService {
             'Content-Type': 'application/json',
           },
           connectTimeout: const Duration(seconds: 30),
-          // Long chapters / slow models need headroom per chunk.
-          receiveTimeout: const Duration(minutes: 3),
+          // Streaming keeps the connection alive with continuous data,
+          // so a longer receiveTimeout is safe as a backstop.
+          receiveTimeout: const Duration(minutes: 10),
         ));
 
   final Dio _dio;
@@ -156,25 +160,63 @@ class TranslationService {
     );
   }
 
+  /// Streaming version – tokens arrive continuously so the receiveTimeout
+  /// is continuously refreshed and the old 3-minute abort no longer occurs.
   Future<String> _translateChunk(String chunk) async {
-    final response = await _dio.post('/chat/completions', data: {
-      'model': model,
-      // International Kimi models require temperature == 1.
-      'temperature': 1,
-      'messages': [
-        {'role': 'system', 'content': _systemPrompt},
-        {
-          'role': 'user',
-          'content':
-              'Translate the following novel text into English. '
-              'Keep paragraph breaks.\n\n$chunk',
+    final response = await _dio.post<ResponseBody>(
+      '/chat/completions',
+      data: {
+        'model': model,
+        // International Kimi models require temperature == 1.
+        'temperature': 1,
+        'stream': true,
+        'messages': [
+          {'role': 'system', 'content': _systemPrompt},
+          {
+            'role': 'user',
+            'content':
+                'Translate the following novel text into English. '
+                'Keep paragraph breaks.\n\n$chunk',
+          },
+        ],
+      },
+      options: Options(
+        responseType: ResponseType.stream,
+        headers: {
+          'Accept': 'text/event-stream',
         },
-      ],
-    });
-    final content = response.data['choices']?[0]?['message']?['content'];
-    if (content is! String || content.trim().isEmpty) {
+      ),
+    );
+
+    final buffer = StringBuffer();
+    final stream = response.data!.stream
+        .cast<List<int>>()
+        .transform(utf8.decoder)
+        .transform(const LineSplitter());
+
+    await for (final line in stream) {
+      if (line.isEmpty) continue;
+      if (!line.startsWith('data: ')) continue;
+
+      final data = line.substring(6).trim();
+      if (data == '[DONE]') break;
+
+      try {
+        final json = jsonDecode(data) as Map<String, dynamic>;
+        final delta = json['choices']?[0]?['delta'];
+        final content = delta?['content'] as String?;
+        if (content != null && content.isNotEmpty) {
+          buffer.write(content);
+        }
+      } catch (_) {
+        // Ignore keep-alive or malformed lines
+      }
+    }
+
+    final result = buffer.toString().trim();
+    if (result.isEmpty) {
       throw StateError('Empty response from Moonshot API');
     }
-    return content.trim();
+    return result;
   }
 }
