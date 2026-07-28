@@ -17,12 +17,29 @@ Future<void> main() async {
       systemNavigationBarIconBrightness: Brightness.light,
     ),
   );
-  await StorageService.instance.init();
-  runApp(const ChapterFlowApp());
+
+  String? startupError;
+  try {
+    await StorageService.instance.init();
+  } catch (error, stackTrace) {
+    startupError = error.toString();
+    FlutterError.reportError(
+      FlutterErrorDetails(
+        exception: error,
+        stack: stackTrace,
+        library: 'ChapterFlow startup',
+        context: ErrorDescription('Storage initialization failed'),
+      ),
+    );
+  }
+
+  runApp(ChapterFlowApp(startupError: startupError));
 }
 
 class ChapterFlowApp extends StatelessWidget {
-  const ChapterFlowApp({super.key});
+  const ChapterFlowApp({super.key, this.startupError});
+
+  final String? startupError;
 
   @override
   Widget build(BuildContext context) {
@@ -30,13 +47,15 @@ class ChapterFlowApp extends StatelessWidget {
       title: 'ChapterFlow',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.dark(),
-      home: const RootShell(),
+      home: RootShell(startupError: startupError),
     );
   }
 }
 
 class RootShell extends StatefulWidget {
-  const RootShell({super.key});
+  const RootShell({super.key, this.startupError});
+
+  final String? startupError;
 
   @override
   State<RootShell> createState() => _RootShellState();
@@ -47,6 +66,35 @@ class _RootShellState extends State<RootShell> {
 
   @override
   Widget build(BuildContext context) {
+    if (widget.startupError != null) {
+      return Scaffold(
+        backgroundColor: AppTheme.bg,
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.warning_amber_rounded, size: 48, color: AppTheme.accent),
+                const SizedBox(height: 12),
+                Text(
+                  'ChapterFlow started with a storage warning.',
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(color: AppTheme.textPrimary),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  widget.startupError!,
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: AppTheme.textSecondary),
+                  textAlign: TextAlign.center,
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
     final Widget body;
     switch (_index) {
       case 0:
