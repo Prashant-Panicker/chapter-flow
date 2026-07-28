@@ -50,7 +50,7 @@ class TranslationService {
 
   final Dio _dio;
   static const String model = 'kimi-k2.6';
-  static const int _chunkChars = 1800;
+  static const int _chunkChars = 1000;
 
   /// Splits raw source text into paragraph-respecting chunks.
   List<String> _chunk(String text) {
