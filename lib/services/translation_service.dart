@@ -168,8 +168,9 @@ class TranslationService {
       data: {
         'model': model,
         // International Kimi models require temperature == 1.
-        'temperature': 1,
+        'temperature': 0.6,                // Instant mode uses 0.6
         'stream': true,
+        'thinking': {'type': 'disabled'},  // ← this is Instant mode
         'messages': [
           {'role': 'system', 'content': _systemPrompt},
           {
