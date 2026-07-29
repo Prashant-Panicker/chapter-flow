@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
 
+import '../main.dart' show rootTabIndex;
 import '../models/chapter.dart';
+import '../services/storage_service.dart';
 import '../theme/app_theme.dart';
+import '../widgets/reader_nav_bar.dart';
 
 enum _OfflineViewMode { english, bilingual, source }
 
@@ -17,6 +20,54 @@ class OfflineReaderScreen extends StatefulWidget {
 class _OfflineReaderScreenState extends State<OfflineReaderScreen> {
   _OfflineViewMode _mode = _OfflineViewMode.english;
   double _fontSize = 17;
+  bool _continuousEnabled = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadContinuousPref();
+  }
+
+  Future<void> _loadContinuousPref() async {
+    final enabled = await StorageService.instance.getContinuousEnabled();
+    if (!mounted) return;
+    setState(() => _continuousEnabled = enabled);
+  }
+
+  Future<void> _setContinuousEnabled(bool enabled) async {
+    setState(() => _continuousEnabled = enabled);
+    await StorageService.instance.setContinuousEnabled(enabled);
+  }
+
+  /// Follows a saved link. A chapter that is still in the library opens
+  /// instantly and stays offline; anything else needs the live page, which
+  /// only exists on the Browser tab.
+  Future<void> _follow(String? url, {required String label}) async {
+    if (url == null || url.isEmpty) return;
+
+    final saved = StorageService.instance.getChapter(url);
+    if (saved != null && saved.translatedText.isNotEmpty) {
+      await StorageService.instance.touchLastRead(url);
+      if (!mounted) return;
+      await Navigator.of(context).pushReplacement(
+        MaterialPageRoute(builder: (_) => OfflineReaderScreen(chapter: saved)),
+      );
+      return;
+    }
+
+    await StorageService.instance.setLastUrl(url);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..removeCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text('$label is not saved offline — opening in Browser.'),
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    Navigator.of(context).popUntil((route) => route.isFirst);
+    rootTabIndex.value = 0;
+  }
 
   String get _text {
     final c = widget.chapter;
@@ -116,6 +167,17 @@ class _OfflineReaderScreenState extends State<OfflineReaderScreen> {
             ),
           ),
         ),
+      ),
+      bottomNavigationBar: ReaderNavBar(
+        hasPrev: (widget.chapter.prevUrl ?? '').isNotEmpty,
+        hasNext: (widget.chapter.nextUrl ?? '').isNotEmpty,
+        hasToc: (widget.chapter.tocUrl ?? '').isNotEmpty,
+        onPrev: () => _follow(widget.chapter.prevUrl, label: 'Previous chapter'),
+        onNext: () => _follow(widget.chapter.nextUrl, label: 'Next chapter'),
+        onToc: () => _follow(widget.chapter.tocUrl, label: 'Contents'),
+        autoTranslateEnabled: _continuousEnabled,
+        autoTranslateBusy: false,
+        onAutoTranslateChanged: _setContinuousEnabled,
       ),
     );
   }

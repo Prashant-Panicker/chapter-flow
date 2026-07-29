@@ -69,6 +69,11 @@ Titles come off the page in Chinese and are translated on demand, then
 persisted. The library backfills any that are still missing the next time
 you open it.
 
+Opening a card gives the same Prev / TOC / Next / auto-translate chrome as
+the live reader, driven by the links saved with the chapter. A target that
+is still in the library opens instantly and stays offline; anything else
+needs a live page, so it hands off to the Browser tab.
+
 ## How translation stays consistent
 
 The hard problem with chapter-at-a-time translation is drift: 朱雀 renders

@@ -52,6 +52,11 @@ class ChapterFlowApp extends StatelessWidget {
   }
 }
 
+/// Which root tab is showing. Exposed so a pushed screen can hand control
+/// back to the Browser tab — the WebView only exists there, so anything
+/// needing a live page has to go through it.
+final ValueNotifier<int> rootTabIndex = ValueNotifier<int>(0);
+
 class RootShell extends StatefulWidget {
   const RootShell({super.key, this.startupError});
 
@@ -62,7 +67,23 @@ class RootShell extends StatefulWidget {
 }
 
 class _RootShellState extends State<RootShell> {
-  int _index = 0;
+  int get _index => rootTabIndex.value;
+
+  @override
+  void initState() {
+    super.initState();
+    rootTabIndex.addListener(_onTabChanged);
+  }
+
+  @override
+  void dispose() {
+    rootTabIndex.removeListener(_onTabChanged);
+    super.dispose();
+  }
+
+  void _onTabChanged() {
+    if (mounted) setState(() {});
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -117,7 +138,7 @@ class _RootShellState extends State<RootShell> {
       body: body,
       bottomNavigationBar: NavigationBar(
         selectedIndex: _index,
-        onDestinationSelected: (i) => setState(() => _index = i),
+        onDestinationSelected: (i) => rootTabIndex.value = i,
         destinations: const [
           NavigationDestination(
             icon: Icon(Icons.public_outlined),
