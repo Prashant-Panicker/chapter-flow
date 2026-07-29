@@ -67,14 +67,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _clearKey() async {
-    await StorageService.instance.clearApiKey();
-    if (!mounted) return;
-    setState(() {
-      _hasKey = false;
-      _savedKey = '';
-      _controller.clear();
-    });
-    _showSnack('API key removed.');
+    try {
+      await StorageService.instance.clearApiKey();
+      if (!mounted) return;
+      setState(() {
+        _hasKey = false;
+        _savedKey = '';
+        _controller.clear();
+      });
+      _showSnack('API key removed.');
+    } catch (_) {
+      _showSnack('Could not remove key.');
+    }
   }
 
   Future<void> _clearWebViewData() async {
@@ -173,7 +177,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
                 if (_hasKey)
                   OutlinedButton(
-                    onPressed: _clearKey,
+                    onPressed: _saving ? null : _clearKey,
                     child: const Text('Clear'),
                   ),
                 if (showingSavedKey)

@@ -31,23 +31,27 @@ class ReaderNavBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      color: AppTheme.surface,
-      elevation: 0,
-      child: SafeArea(
-        top: false,
-        child: Container(
-          padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
-          decoration: const BoxDecoration(
-            border: Border(top: BorderSide(color: AppTheme.border)),
-          ),
-          child: Row(
-            children: [
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final showLabels = constraints.maxWidth >= 360;
+        return Material(
+          color: AppTheme.surface,
+          elevation: 0,
+          child: SafeArea(
+            top: false,
+            child: Container(
+              padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+              decoration: const BoxDecoration(
+                border: Border(top: BorderSide(color: AppTheme.border)),
+              ),
+              child: Row(
+                children: [
               Expanded(
                 child: _ToggleButton(
                   enabled: autoTranslateEnabled,
                   busy: autoTranslateBusy,
                   onChanged: onAutoTranslateChanged,
+                  showLabel: showLabels,
                 ),
               ),
               const SizedBox(width: 6),
@@ -55,6 +59,7 @@ class ReaderNavBar extends StatelessWidget {
                 child: _NavButton(
                   icon: Icons.chevron_left_rounded,
                   label: 'Prev',
+                  showLabel: showLabels,
                   enabled: hasPrev && !busy,
                   onTap: onPrev,
                 ),
@@ -64,6 +69,7 @@ class ReaderNavBar extends StatelessWidget {
                 child: _NavButton(
                   icon: Icons.list_alt_rounded,
                   label: 'TOC',
+                  showLabel: showLabels,
                   enabled: hasToc && !busy,
                   onTap: onToc,
                 ),
@@ -73,16 +79,19 @@ class ReaderNavBar extends StatelessWidget {
                 child: _NavButton(
                   icon: Icons.chevron_right_rounded,
                   label: 'Next',
+                  showLabel: showLabels,
                   enabled: hasNext && !busy,
                   onTap: onNext,
                   emphasized: hasNext && !busy,
                   iconTrailing: true,
                 ),
               ),
-            ],
+                ],
+              ),
+            ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 }
@@ -92,11 +101,13 @@ class _ToggleButton extends StatelessWidget {
     required this.enabled,
     required this.busy,
     required this.onChanged,
+    required this.showLabel,
   });
 
   final bool enabled;
   final bool busy;
   final ValueChanged<bool> onChanged;
+  final bool showLabel;
 
   @override
   Widget build(BuildContext context) {
@@ -126,15 +137,17 @@ class _ToggleButton extends StatelessWidget {
                   )
                 else
                   Icon(Icons.translate_rounded, size: 18, color: foreground),
-                const SizedBox(width: 4),
-                Text(
-                  enabled ? 'Auto on' : 'Auto off',
-                  style: TextStyle(
-                    color: foreground,
-                    fontWeight: FontWeight.w600,
-                    fontSize: 13,
+                if (showLabel) ...[
+                  const SizedBox(width: 4),
+                  Text(
+                    enabled ? 'Auto on' : 'Auto off',
+                    style: TextStyle(
+                      color: foreground,
+                      fontWeight: FontWeight.w600,
+                      fontSize: 13,
+                    ),
                   ),
-                ),
+                ],
               ],
             ),
           ),
@@ -148,6 +161,7 @@ class _NavButton extends StatelessWidget {
   const _NavButton({
     required this.icon,
     required this.label,
+    required this.showLabel,
     required this.enabled,
     required this.onTap,
     this.iconTrailing = false,
@@ -156,6 +170,7 @@ class _NavButton extends StatelessWidget {
 
   final IconData icon;
   final String label;
+  final bool showLabel;
   final bool enabled;
   final VoidCallback onTap;
   final bool iconTrailing;
@@ -174,30 +189,36 @@ class _NavButton extends StatelessWidget {
             ? AppTheme.accent
             : AppTheme.textPrimary;
 
-    return Material(
-      color: bg,
-      borderRadius: BorderRadius.circular(12),
-      child: InkWell(
-        onTap: enabled ? onTap : null,
+    return Tooltip(
+      message: label,
+      child: Material(
+        color: bg,
         borderRadius: BorderRadius.circular(12),
-        child: SizedBox(
-          height: 48,
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              if (!iconTrailing) Icon(icon, size: 22, color: fg),
-              if (!iconTrailing) const SizedBox(width: 2),
-              Text(
-                label,
-                style: TextStyle(
-                  color: fg,
-                  fontWeight: FontWeight.w600,
-                  fontSize: 14,
-                ),
-              ),
-              if (iconTrailing) const SizedBox(width: 2),
-              if (iconTrailing) Icon(icon, size: 22, color: fg),
-            ],
+        child: InkWell(
+          onTap: enabled ? onTap : null,
+          borderRadius: BorderRadius.circular(12),
+          child: SizedBox(
+            height: 48,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                if (!iconTrailing || !showLabel)
+                  Icon(icon, size: 22, color: fg),
+                if (showLabel && !iconTrailing) const SizedBox(width: 2),
+                if (showLabel)
+                  Text(
+                    label,
+                    style: TextStyle(
+                      color: fg,
+                      fontWeight: FontWeight.w600,
+                      fontSize: 14,
+                    ),
+                  ),
+                if (showLabel && iconTrailing) const SizedBox(width: 2),
+                if (showLabel && iconTrailing)
+                  Icon(icon, size: 22, color: fg),
+              ],
+            ),
           ),
         ),
       ),

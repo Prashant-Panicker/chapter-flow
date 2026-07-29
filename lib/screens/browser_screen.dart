@@ -76,15 +76,26 @@ class _BrowserScreenState extends State<BrowserScreen> {
         url = 'https://www.google.com/search?q=${Uri.encodeComponent(url)}';
       }
     }
-    await _controller?.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
+    try {
+      await _controller?.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
+    } catch (_) {
+      _showSnack('Could not open address.');
+    }
   }
 
   Future<void> _enterReader() async {
-    if (_controller == null) return;
+    final controller = _controller;
+    if (controller == null || _loading) return;
     setState(() => _extracting = true);
     try {
-      final raw =
-          await _controller!.evaluateJavascript(source: kExtractChapterJs);
+      final extractionUrl = (await controller.getUrl())?.toString();
+      if (extractionUrl == null) return;
+      final raw = await controller.evaluateJavascript(source: kExtractChapterJs);
+      final currentUrl = (await controller.getUrl())?.toString();
+      if (currentUrl != extractionUrl) {
+        _showSnack('Page changed. Try again.');
+        return;
+      }
       final data = parseExtractResult(raw);
       final bodyText = (data['bodyText'] as String? ?? '').trim();
 
@@ -95,19 +106,19 @@ class _BrowserScreenState extends State<BrowserScreen> {
         return;
       }
 
-      await StorageService.instance.setLastUrl(_currentUrl);
+      await StorageService.instance.setLastUrl(extractionUrl);
 
       if (!mounted) return;
       await Navigator.of(context).push(
         MaterialPageRoute(
           builder: (_) => ReaderScreen(
-            url: _currentUrl,
+            url: extractionUrl,
             pageTitle: data['pageTitle'] as String? ?? '',
             bodyText: bodyText,
             prevUrl: data['prevUrl'] as String?,
             nextUrl: data['nextUrl'] as String?,
             tocUrl: data['tocUrl'] as String?,
-            webViewController: _controller!,
+            webViewController: controller,
           ),
         ),
       );
@@ -279,6 +290,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
                       _controller = controller;
                     },
                     onLoadStart: (controller, url) {
+                      if (!mounted) return;
                       setState(() {
                         _loading = true;
                         if (url != null) {
@@ -288,9 +300,11 @@ class _BrowserScreenState extends State<BrowserScreen> {
                       });
                     },
                     onProgressChanged: (controller, progress) {
+                      if (!mounted) return;
                       setState(() => _progress = progress / 100);
                     },
                     onLoadStop: (controller, url) async {
+                      if (!mounted) return;
                       setState(() {
                         _loading = false;
                         if (url != null) {
@@ -302,6 +316,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
                       await _updateNav();
                     },
                     onUpdateVisitedHistory: (controller, url, isReload) {
+                      if (!mounted) return;
                       if (url != null) {
                         setState(() {
                           _currentUrl = url.toString();
@@ -312,6 +327,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
                       _updateNav();
                     },
                     onReceivedError: (controller, request, error) {
+                      if (!mounted) return;
                       if (request.isForMainFrame ?? false) {
                         setState(() => _loading = false);
                         _showSnack(
@@ -321,6 +337,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
                       }
                     },
                     onReceivedHttpError: (controller, request, response) {
+                      if (!mounted) return;
                       final code = response.statusCode ?? 0;
                       if ((request.isForMainFrame ?? false) && code >= 400) {
                         setState(() => _loading = false);
@@ -335,7 +352,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
         ],
       ),
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: _extracting ? null : _enterReader,
+        onPressed: _extracting || _loading ? null : _enterReader,
         icon: _extracting
             ? const SizedBox(
                 width: 18,

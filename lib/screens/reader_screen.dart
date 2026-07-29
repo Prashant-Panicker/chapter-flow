@@ -70,6 +70,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   String? _pendingTranslatedText;
   int _pendingChunkCurrent = 0;
   int _pendingChunkTotal = 0;
+  int _continuousChangeId = 0;
   int _chunkCurrent = 0;
   int _chunkTotal = 0;
   double _fontSize = 17;
@@ -159,7 +160,13 @@ class _ReaderScreenState extends State<ReaderScreen>
   Future<TranslationService?> _buildTranslator({
     bool showMissingKeyMessage = true,
   }) async {
-    final key = await StorageService.instance.getApiKey();
+    String? key;
+    try {
+      key = await StorageService.instance.getApiKey();
+    } catch (_) {
+      if (showMissingKeyMessage) _showSnack('API key unavailable.');
+      return null;
+    }
     if (key == null || key.isEmpty) {
       if (showMissingKeyMessage) {
         _showSnack('Add your Moonshot API key in Settings to translate.');
@@ -178,7 +185,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     }
 
     final translator = await _buildTranslator();
-    if (translator == null) return;
+    if (translator == null || !mounted) return;
     if (_appInBackground) {
       _resumeTranslation = true;
       return;
@@ -195,6 +202,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       if (force) _translatedText = '';
     });
 
+    var retryRequested = false;
     try {
       final result = await translator.translateChapter(
         rawText: _rawText,
@@ -235,8 +243,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         ),
       );
       if (retry == true && mounted) {
-        await _startTranslation(force: true);
-        return;
+        retryRequested = true;
       }
     } catch (e) {
       _showSnack('Translation error: $e');
@@ -249,9 +256,13 @@ class _ReaderScreenState extends State<ReaderScreen>
         _activeTranslator = null;
       }
     }
+    if (retryRequested && mounted) {
+      await _startTranslation(force: true);
+    }
   }
 
   void _queueTranslationProgress(int current, int total, String partial) {
+    if (!mounted) return;
     _pendingChunkCurrent = current;
     _pendingChunkTotal = total;
     _pendingTranslatedText = partial;
@@ -280,16 +291,33 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   Future<void> _setContinuousEnabled(bool enabled) async {
+    final changeId = ++_continuousChangeId;
     setState(() => _continuousEnabled = enabled);
-    await StorageService.instance.setContinuousEnabled(enabled);
+    if (!enabled) {
+      _prefetchCancelRequested = true;
+      _prefetchTranslator?.cancel();
+      final extraction = _prefetchExtractionCompleter;
+      if (extraction != null && !extraction.isCompleted) {
+        extraction.completeError(TranslationCancelledException());
+      }
+      _prefetchWebView?.dispose();
+      if (_translating) _cancelTranslation();
+    }
+    try {
+      await StorageService.instance.setContinuousEnabled(enabled);
+    } catch (_) {
+      if (mounted && changeId == _continuousChangeId) {
+        setState(() => _continuousEnabled = !enabled);
+        _showSnack('Setting not saved.');
+      }
+      return;
+    }
+    if (!mounted || changeId != _continuousChangeId) return;
     if (enabled && _translatedText.isEmpty && !_translating) {
       _startTranslation();
     } else if (enabled && !_prefetching) {
       _prefetchFuture = _prefetchNextChapter();
-    } else if (!enabled && _translating) {
-      _cancelTranslation();
     }
-    if (!enabled) _prefetchCancelRequested = true;
   }
 
   String _guessBookTitle() {
@@ -389,7 +417,6 @@ class _ReaderScreenState extends State<ReaderScreen>
           _prefetching = false;
           _prefetchUrl = null;
         });
-        _resumeAfterBackground();
       }
     }
   }
@@ -446,33 +473,56 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   Future<void> _navigate(String targetUrl) async {
     if (_translating) _cancelTranslation();
+    if (_prefetching && _prefetchUrl != targetUrl) {
+      _prefetchCancelRequested = true;
+      _prefetchTranslator?.cancel();
+      final extraction = _prefetchExtractionCompleter;
+      if (extraction != null && !extraction.isCompleted) {
+        extraction.completeError(TranslationCancelledException());
+      }
+      await _prefetchWebView?.dispose();
+    }
     setState(() => _busy = true);
     try {
+      final previousUrl =
+          (await widget.webViewController.getUrl())?.toString() ?? _url;
       await widget.webViewController.loadUrl(
         urlRequest: URLRequest(url: WebUri(targetUrl)),
       );
-      await _waitForLoadThenExtract(targetUrl);
+      await _waitForLoadThenExtract(targetUrl, previousUrl: previousUrl);
     } catch (e) {
       _showSnack('Navigation failed.');
       if (mounted) setState(() => _busy = false);
     }
   }
 
-  Future<void> _waitForLoadThenExtract(String targetUrl) async {
+  Future<void> _waitForLoadThenExtract(
+    String targetUrl, {
+    required String previousUrl,
+  }) async {
     const maxAttempts = 25;
     for (var attempt = 0; attempt < maxAttempts; attempt++) {
       await Future.delayed(const Duration(milliseconds: 400));
       if (!mounted) return;
       try {
+        final currentUrl =
+            (await widget.webViewController.getUrl())?.toString();
+        final progress = await widget.webViewController.getProgress();
+        if (currentUrl == null ||
+            _samePage(currentUrl, previousUrl) ||
+            progress < 80) {
+          continue;
+        }
         final raw = await widget.webViewController
             .evaluateJavascript(source: kExtractChapterJs);
         final data = parseExtractResult(raw);
         final bodyText = (data['bodyText'] as String? ?? '').trim();
-        if (bodyText.length >= 40) {
-          await StorageService.instance.setLastUrl(targetUrl);
+        if (bodyText.length >= 40 && bodyText != _rawText.trim()) {
+          final resolvedUrl = currentUrl;
+          await StorageService.instance.setLastUrl(resolvedUrl);
           if (!mounted) return;
           setState(() {
-            _url = targetUrl;
+            _url = resolvedUrl;
             _pageTitle = data['pageTitle'] as String? ?? '';
             _rawText = bodyText;
             _translatedText = '';
@@ -480,11 +530,12 @@ class _ReaderScreenState extends State<ReaderScreen>
             _nextUrl = data['nextUrl'] as String?;
             _tocUrl = data['tocUrl'] as String?;
           });
-          var cached = StorageService.instance.getChapter(targetUrl);
+          var cached = StorageService.instance.getChapter(resolvedUrl);
           if ((cached == null || cached.translatedText.isEmpty) &&
-              _prefetchUrl == targetUrl) {
+              (_prefetchUrl == targetUrl || _prefetchUrl == resolvedUrl)) {
             await _prefetchFuture;
-            cached = StorageService.instance.getChapter(targetUrl);
+            cached = StorageService.instance.getChapter(resolvedUrl) ??
+                StorageService.instance.getChapter(targetUrl);
           }
           if (!mounted) return;
           if (cached != null && cached.translatedText.isNotEmpty) {
@@ -513,16 +564,33 @@ class _ReaderScreenState extends State<ReaderScreen>
     }
   }
 
+  bool _samePage(String first, String second) {
+    Uri? normalize(String value) {
+      final uri = Uri.tryParse(value);
+      if (uri == null) return null;
+      final path = uri.path.length > 1 && uri.path.endsWith('/')
+          ? uri.path.substring(0, uri.path.length - 1)
+          : uri.path;
+      return uri.replace(path: path, fragment: '');
+    }
+
+    return normalize(first) == normalize(second);
+  }
+
   Future<void> _openToc() async {
     if (_tocUrl == null) {
       _showSnack('TOC unavailable.');
       return;
     }
-    await widget.webViewController.loadUrl(
-      urlRequest: URLRequest(url: WebUri(_tocUrl!)),
-    );
-    if (!mounted) return;
-    Navigator.of(context).pop();
+    try {
+      await widget.webViewController.loadUrl(
+        urlRequest: URLRequest(url: WebUri(_tocUrl!)),
+      );
+      if (!mounted) return;
+      Navigator.of(context).pop();
+    } catch (_) {
+      _showSnack('TOC failed to open.');
+    }
   }
 
   void _showSnack(String message) {

@@ -85,6 +85,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
             ),
             onDismissed: (_) async {
               await StorageService.instance.deleteChapter(chapter.url);
+              if (!mounted) return;
               _refresh();
             },
             child: Material(
@@ -100,6 +101,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                       builder: (_) => OfflineReaderScreen(chapter: chapter),
                     ),
                   );
+                  if (!mounted) return;
                   _refresh();
                 },
                 child: Container(

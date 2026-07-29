@@ -113,6 +113,19 @@ class TranslationService {
     }
 
     for (final p in paragraphs) {
+      if (p.length > _chunkChars) {
+        flush();
+        var start = 0;
+        while (p.length - start > _chunkChars) {
+          var end = start + _chunkChars;
+          if (_isLowSurrogate(p.codeUnitAt(end))) end--;
+          final part = p.substring(start, end).trim();
+          if (part.isNotEmpty) chunks.add(part);
+          start = end;
+        }
+        if (start < p.length) buffer.write(p.substring(start));
+        continue;
+      }
       final addition = buffer.isEmpty ? p : '\n\n$p';
       if (buffer.isNotEmpty &&
           buffer.length + addition.length > _chunkChars) {
@@ -122,14 +135,13 @@ class TranslationService {
         if (buffer.isNotEmpty) buffer.write('\n\n');
         buffer.write(p);
       }
-      // Single huge paragraph: force flush so we still make progress.
-      if (buffer.length > _chunkChars * 2) {
-        flush();
-      }
     }
     flush();
     return chunks.isEmpty ? [text] : chunks;
   }
+
+  bool _isLowSurrogate(int codeUnit) =>
+      codeUnit >= 0xDC00 && codeUnit <= 0xDFFF;
 
   /// Translates [rawText] chunk by chunk.
   ///
