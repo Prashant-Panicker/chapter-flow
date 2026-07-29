@@ -224,8 +224,13 @@ class _ReaderScreenState extends State<ReaderScreen>
 
     var retryRequested = false;
     try {
+      // Runs alongside the first chunk instead of before it, so pinning terms
+      // costs no perceived delay. Chunk 1 uses whatever the series already
+      // knows; later chunks pick up anything new this chapter introduced.
+      unawaited(_buildGlossary(translator, _rawText, _seriesKey));
       final result = await translator.translateChapter(
         rawText: _rawText,
+        glossary: () => StorageService.instance.glossaryFor(_seriesKey),
         shouldCancel: () => _cancelRequested,
         onProgress: (current, total, partial) {
           _queueTranslationProgress(current, total, partial);
@@ -413,6 +418,29 @@ class _ReaderScreenState extends State<ReaderScreen>
     }
   }
 
+  /// Best-effort term pinning. Runs off the translation queue and swallows
+  /// every failure: a missing glossary must never stop a chapter rendering.
+  Future<void> _buildGlossary(
+    TranslationService translator,
+    String rawText,
+    String seriesKey, {
+    bool prefetch = false,
+  }) async {
+    if (_sourceBookTitle.isEmpty || rawText.isEmpty) return;
+    try {
+      final found = await translator.extractGlossary(
+        rawText: rawText,
+        known: StorageService.instance.glossaryFor(seriesKey),
+        shouldCancel: () =>
+            prefetch ? _prefetchCancelRequested : _cancelRequested,
+      );
+      if (found.isEmpty) return;
+      await StorageService.instance.mergeGlossary(seriesKey, found);
+    } catch (_) {
+      // Ignored on purpose.
+    }
+  }
+
   /// Keeps at most the chapter being read plus the prefetched next one, so
   /// the library only ever surfaces the last read chapter of this novel.
   Future<void> _pruneCurrentSeries() async {
@@ -474,8 +502,16 @@ class _ReaderScreenState extends State<ReaderScreen>
       if (_prefetchCancelRequested || !_continuousEnabled) return;
 
       final rawText = (data['bodyText'] as String? ?? '').trim();
+      final seriesKey = _seriesKey;
+      // The next chapter's terms are pinned while it is still being
+      // prefetched, so by the time the reader gets there the wording is
+      // already settled.
+      unawaited(
+        _buildGlossary(translator, rawText, seriesKey, prefetch: true),
+      );
       final translatedText = await translator.translateChapter(
         rawText: rawText,
+        glossary: () => StorageService.instance.glossaryFor(seriesKey),
         shouldCancel: () => _prefetchCancelRequested || !_continuousEnabled,
         onProgress: (_, __, ___) {},
       );

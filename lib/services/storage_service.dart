@@ -3,9 +3,11 @@ import 'package:hive_ce_flutter/hive_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/chapter.dart';
+import '../models/glossary_entry.dart';
 
 /// Central place for everything persisted on-device:
 /// - Hive box "chapters" for offline raw+translated text (keyed by URL)
+/// - Hive box "glossaries" for per-novel term bindings (keyed by series)
 /// - SharedPreferences for last URL / continuous-translate toggle
 /// - flutter_secure_storage for the user's own Moonshot API key
 class StorageService {
@@ -13,12 +15,20 @@ class StorageService {
   static final StorageService instance = StorageService._();
 
   static const _chaptersBoxName = 'chapters';
+  static const _glossaryBoxName = 'glossaries';
   static const _keyLastUrl = 'last_url';
   static const _keyContinuousEnabled = 'continuous_translate_enabled';
   static const _secureApiKeyKey = 'moonshot_api_key';
 
+  /// Bounds prompt-building work and storage for very long novels.
+  static const _maxGlossaryEntries = 1500;
+
+  /// A term may hold a second binding only when it is a genuine homonym.
+  static const _maxSensesPerTerm = 2;
+
   final _secureStorage = const FlutterSecureStorage();
   late Box<Chapter> _chaptersBox;
+  late Box<List<dynamic>> _glossaryBox;
   bool _initialized = false;
 
   Future<void> init() async {
@@ -27,9 +37,59 @@ class StorageService {
     if (!Hive.isAdapterRegistered(0)) {
       Hive.registerAdapter(ChapterAdapter());
     }
+    if (!Hive.isAdapterRegistered(1)) {
+      Hive.registerAdapter(GlossaryEntryAdapter());
+    }
     _chaptersBox = await Hive.openBox<Chapter>(_chaptersBoxName);
+    _glossaryBox = await Hive.openBox<List<dynamic>>(_glossaryBoxName);
     _initialized = true;
     await pruneAllSeries();
+  }
+
+  // ---------------- Glossary (key = series key) ----------------
+
+  List<GlossaryEntry> glossaryFor(String seriesKey) {
+    final raw = _glossaryBox.get(seriesKey);
+    if (raw == null || raw.isEmpty) return const [];
+    return raw.whereType<GlossaryEntry>().toList(growable: false);
+  }
+
+  /// Merges newly extracted terms using first-write-wins: once a term has a
+  /// binding it is never overwritten, which is what makes the translation
+  /// consistent across chunks and chapters.
+  ///
+  /// A second binding for the same term is accepted only when its [style]
+  /// differs — that distinguishes a real homonym (a character *named* 朱雀 vs
+  /// the 朱雀 species) from the model simply being inconsistent.
+  Future<void> mergeGlossary(
+    String seriesKey,
+    List<GlossaryEntry> incoming,
+  ) async {
+    if (incoming.isEmpty) return;
+    final current = glossaryFor(seriesKey).toList();
+    if (current.length >= _maxGlossaryEntries) return;
+
+    final senses = <String, List<GlossaryEntry>>{};
+    for (final entry in current) {
+      senses.putIfAbsent(entry.source, () => []).add(entry);
+    }
+    final pinned = current.map((e) => e.pinKey).toSet();
+
+    var added = false;
+    for (final entry in incoming) {
+      if (current.length >= _maxGlossaryEntries) break;
+      if (pinned.contains(entry.pinKey)) continue;
+      final existing = senses[entry.source] ?? const <GlossaryEntry>[];
+      if (existing.length >= _maxSensesPerTerm) continue;
+      if (existing.any((e) => e.style == entry.style)) continue;
+
+      current.add(entry);
+      pinned.add(entry.pinKey);
+      senses.putIfAbsent(entry.source, () => []).add(entry);
+      added = true;
+    }
+    if (!added) return;
+    await _glossaryBox.put(seriesKey, current);
   }
 
   // ---------------- Chapters (key = chapter URL / id) ----------------
@@ -91,8 +151,8 @@ class StorageService {
         .where((c) => c.seriesKey == seriesKey)
         .map((c) => c.id)
         .toList();
-    if (ids.isEmpty) return;
-    await _chaptersBox.deleteAll(ids);
+    if (ids.isNotEmpty) await _chaptersBox.deleteAll(ids);
+    await _glossaryBox.delete(seriesKey);
   }
 
   /// Backfills the English novel name once it has been translated.

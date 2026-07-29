@@ -3,6 +3,8 @@ import 'dart:convert';
 
 import 'package:dio/dio.dart';
 
+import '../models/glossary_entry.dart';
+
 class TranslationCancelledException implements Exception {
   @override
   String toString() => 'Translation cancelled by user';
@@ -34,14 +36,47 @@ class ApiKeyValidationException implements Exception {
 }
 
 const String _systemPrompt =
-    'You are an expert translator specializing in Chinese web novels '
-    '(Wuxia, Xianxia, Xuanhuan, and modern web fiction). Translate the '
-    'provided text into natural, high-quality English. Keep proper names '
-    'in Pinyin (do not translate them literally). Ensure cultivation '
-    'realms, techniques, and idioms fit progression-fantasy lore. '
-    'Translate paragraph-by-paragraph without summarization. Preserve '
-    'paragraph breaks. Do not add commentary or notes. Output only the '
-    'translated text.';
+    'You are an expert translator of Chinese web novels (Wuxia, Xianxia, '
+    'Xuanhuan, and modern web fiction). Translate the provided text into '
+    'natural, high-quality English.\n'
+    '\n'
+    'NAMING RULES — follow these exactly, they matter more than style:\n'
+    '1. Personal names of characters, and proper names of places, sects, '
+    'clans and organisations, are written in Pinyin (no tone marks, '
+    'capitalised). Never translate them literally.\n'
+    '2. EVERYTHING else is written in natural English: species and races, '
+    'cultivation realms, techniques, artifacts, pills, formations, '
+    'bloodlines, titles and ranks.\n'
+    '3. A word that names a kind of thing is English even when it looks like '
+    'a name. 朱雀 as a creature is "Vermillion Bird", not "Zhuque". Use Pinyin '
+    'only when the word is the name of one specific individual, place or '
+    'organisation. So "青云是朱雀" is "Qingyun is a Vermillion Bird".\n'
+    '4. Once a term has an English form, never vary it. Reuse the exact same '
+    'wording every time it appears.\n'
+    '\n'
+    'Translate paragraph-by-paragraph without summarising. Preserve '
+    'paragraph breaks. Do not add commentary, notes or headings. Output only '
+    'the translated text.';
+
+const String _glossarySystemPrompt =
+    'You build a translation glossary from Chinese web-novel text.\n'
+    'Return ONLY a JSON array, no markdown fence and no commentary. Each '
+    'element must be:\n'
+    '{"source":"<exact substring from the text>","english":"<rendering>",'
+    '"style":"pinyin"|"english","type":"<short description>"}\n'
+    '\n'
+    'style is "pinyin" ONLY for personal names of characters and proper '
+    'names of places, sects, clans and organisations; english must then be '
+    'the Pinyin, no tone marks, capitalised.\n'
+    'style is "english" for everything else: species, races, cultivation '
+    'realms, techniques, artifacts, pills, formations, bloodlines, titles '
+    'and ranks. A word naming a kind of thing is "english" even when it '
+    'looks like a name (朱雀 -> Vermillion Bird, style "english"). Use '
+    '"pinyin" only for one specific individual, place or organisation.\n'
+    'type is a short free-form description in your own words, such as '
+    '"protagonist", "spirit beast species", "sword sect" or "cultivation '
+    'realm".\n'
+    'Include only recurring or plot-relevant terms. At most 40 entries.';
 
 class TranslationService {
   TranslationService({required String apiKey})
@@ -62,7 +97,24 @@ class TranslationService {
   static Future<void> _translationQueue = Future<void>.value();
   static final Map<String, String> _titleCache = <String, String>{};
   static const String model = 'kimi-k2.6';
-  static const int _chunkChars = 3000;
+
+  /// Larger chunks mean fewer seams where the model can re-decide a name.
+  /// Streaming means this does not delay the first visible text; the ceiling
+  /// is [_maxOutputTokens], which the English output must comfortably fit in.
+  static const int _chunkChars = 5000;
+
+  /// Explicit so a long chunk can never be silently truncated mid-chapter.
+  static const int _maxOutputTokens = 8192;
+
+  /// Upper bound on how much of a chapter is sent for glossary extraction.
+  static const int _glossarySampleChars = 12000;
+
+  /// Caps how many bindings are injected into a single chunk prompt.
+  static const int _maxInjectedTerms = 60;
+
+  /// How much of the previous chunk's English is carried forward for tone
+  /// and pronoun continuity.
+  static const int _continuityChars = 400;
 
   void cancel() {
     if (!_cancelToken.isCancelled) {
@@ -93,9 +145,14 @@ class TranslationService {
               'role': 'system',
               'content':
                   'You translate Chinese web novel names and chapter headings '
-                  'into English. Keep proper names in Pinyin. Render chapter '
-                  'markers as "Chapter N". Reply with only the English title '
-                  'on a single line — no quotes, no explanation.',
+                  'into English. Personal names of characters and proper '
+                  'names of places, sects and organisations stay in Pinyin. '
+                  'Everything else becomes natural English — species, realms, '
+                  'techniques, artifacts, titles. A word naming a kind of '
+                  'thing is English even when it looks like a name '
+                  '(朱雀 -> Vermillion Bird). Render chapter markers as '
+                  '"Chapter N". Reply with only the English title on a single '
+                  'line — no quotes, no explanation.',
             },
             {'role': 'user', 'content': source},
           ],
@@ -142,6 +199,129 @@ class TranslationService {
         'Could not verify key. Check your connection.',
       );
     }
+  }
+
+  /// Extracts term bindings from a chapter's source text.
+  ///
+  /// Deliberately kept out of [_translationQueue] and off the critical path:
+  /// callers run it alongside the first chunk so it adds no perceived delay,
+  /// and every failure mode returns an empty list rather than throwing.
+  Future<List<GlossaryEntry>> extractGlossary({
+    required String rawText,
+    required List<GlossaryEntry> known,
+    required bool Function() shouldCancel,
+  }) async {
+    final sample = rawText.length > _glossarySampleChars
+        ? rawText.substring(0, _glossarySampleChars)
+        : rawText;
+    if (sample.trim().length < 200) return const [];
+    if (shouldCancel()) return const [];
+
+    // Only mention terms that actually occur here, so the prompt stays small
+    // however long the novel gets.
+    final relevant = known
+        .where((e) => sample.contains(e.source))
+        .take(80)
+        .map((e) => e.source)
+        .toSet();
+    final knownBlock = relevant.isEmpty
+        ? ''
+        : 'Already established, do not repeat these: '
+            '${relevant.join('、')}\n\n';
+
+    try {
+      final response = await _dio.post<Map<String, dynamic>>(
+        '/chat/completions',
+        cancelToken: _cancelToken,
+        data: {
+          'model': model,
+          'temperature': 0.2,
+          'thinking': {'type': 'disabled'},
+          'messages': [
+            {'role': 'system', 'content': _glossarySystemPrompt},
+            {'role': 'user', 'content': '$knownBlock$sample'},
+          ],
+        },
+      );
+      if (shouldCancel()) return const [];
+      final content =
+          response.data?['choices']?[0]?['message']?['content'] as String?;
+      return _parseGlossary(content);
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  List<GlossaryEntry> _parseGlossary(String? content) {
+    if (content == null || content.isEmpty) return const [];
+    final start = content.indexOf('[');
+    final end = content.lastIndexOf(']');
+    if (start < 0 || end <= start) return const [];
+    try {
+      final decoded = jsonDecode(content.substring(start, end + 1));
+      if (decoded is! List) return const [];
+      final entries = <GlossaryEntry>[];
+      for (final row in decoded) {
+        final entry = GlossaryEntry.tryParse(row);
+        if (entry != null) entries.add(entry);
+      }
+      return entries;
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  /// Picks the bindings worth spending prompt space on for this chunk.
+  /// Longer terms first: they are the most specific and the most likely to be
+  /// mistranslated if left unpinned.
+  List<GlossaryEntry> _relevantTerms(
+    String chunk,
+    List<GlossaryEntry> glossary,
+  ) {
+    if (glossary.isEmpty) return const [];
+    final matches =
+        glossary.where((e) => chunk.contains(e.source)).toList(growable: false);
+    if (matches.length <= _maxInjectedTerms) return matches;
+    final sorted = matches.toList()
+      ..sort((a, b) => b.source.length.compareTo(a.source.length));
+    return sorted.take(_maxInjectedTerms).toList(growable: false);
+  }
+
+  String _glossaryBlock(List<GlossaryEntry> terms) {
+    if (terms.isEmpty) return '';
+    final names =
+        terms.where((e) => e.style == GlossaryStyle.pinyin).toList();
+    final concepts =
+        terms.where((e) => e.style == GlossaryStyle.english).toList();
+
+    String describe(GlossaryEntry e) => e.type.isEmpty
+        ? '${e.source} = ${e.english}'
+        : '${e.source} = ${e.english}  (${e.type})';
+
+    final buffer = StringBuffer(
+      'GLOSSARY for this novel. These renderings are already established — '
+      'reuse them exactly, do not invent alternatives.\n',
+    );
+    if (names.isNotEmpty) {
+      buffer.writeln('\nWrite these as shown (Pinyin names, never translated):');
+      for (final e in names) {
+        buffer.writeln('- ${describe(e)}');
+      }
+    }
+    if (concepts.isNotEmpty) {
+      buffer.writeln('\nUse these exact English terms:');
+      for (final e in concepts) {
+        buffer.writeln('- ${describe(e)}');
+      }
+    }
+    if (names.isNotEmpty && concepts.isNotEmpty) {
+      buffer.writeln(
+        '\nIf the same term appears in both lists, choose by context: the '
+        'Pinyin form names a specific individual, the English form names a '
+        'kind of thing.',
+      );
+    }
+    return buffer.toString();
   }
 
   /// Splits raw source text into paragraph-respecting chunks.
@@ -197,17 +377,21 @@ class TranslationService {
   ///
   /// [onProgress] receives (current 1-based, total, partial joined text).
   /// [shouldCancel] is checked before each call and during the response stream.
+  /// [glossary] is read fresh before every chunk, so bindings discovered while
+  /// the chapter is still translating apply to the chunks that follow.
   Future<String> translateChapter({
     required String rawText,
     required void Function(int current, int total, String partialText)
         onProgress,
     required bool Function() shouldCancel,
+    List<GlossaryEntry> Function()? glossary,
   }) {
     return _enqueueTranslation(
       () => _translateChapter(
         rawText: rawText,
         onProgress: onProgress,
         shouldCancel: shouldCancel,
+        glossary: glossary,
       ),
     );
   }
@@ -232,6 +416,7 @@ class TranslationService {
     required void Function(int current, int total, String partialText)
         onProgress,
     required bool Function() shouldCancel,
+    List<GlossaryEntry> Function()? glossary,
   }) async {
     final chunks = _chunk(rawText);
     if (chunks.isEmpty) return '';
@@ -243,10 +428,16 @@ class TranslationService {
       if (shouldCancel()) {
         throw TranslationCancelledException();
       }
+      final terms = _relevantTerms(chunks[i], glossary?.call() ?? const []);
+      final continuity = translatedParts.isEmpty
+          ? ''
+          : _tailOf(translatedParts.last, _continuityChars);
       final translated = await _translateChunkWithRetry(
         chunks[i],
         index: i,
         total: total,
+        terms: terms,
+        continuity: continuity,
         shouldCancel: shouldCancel,
         onStreamProgress: (partialChunk) {
           onProgress(
@@ -263,10 +454,25 @@ class TranslationService {
     return translatedParts.join('\n\n');
   }
 
+  /// Trailing slice of already-translated English, cut at a paragraph or
+  /// sentence boundary so the model is not handed a fragment.
+  String _tailOf(String text, int maxChars) {
+    if (text.isEmpty) return '';
+    final tail =
+        text.length <= maxChars ? text : text.substring(text.length - maxChars);
+    final breakAt = tail.indexOf('\n\n');
+    if (breakAt >= 0 && breakAt < tail.length - 40) {
+      return tail.substring(breakAt + 2).trim();
+    }
+    return tail.trim();
+  }
+
   Future<String> _translateChunkWithRetry(
     String chunk, {
     required int index,
     required int total,
+    required List<GlossaryEntry> terms,
+    required String continuity,
     required bool Function() shouldCancel,
     required void Function(String partialChunk) onStreamProgress,
   }) async {
@@ -278,6 +484,8 @@ class TranslationService {
       try {
         return await _translateChunk(
           chunk,
+          terms: terms,
+          continuity: continuity,
           shouldCancel: shouldCancel,
           onStreamProgress: onStreamProgress,
         );
@@ -389,26 +597,48 @@ class TranslationService {
   /// is continuously refreshed and the old 3-minute abort no longer occurs.
   Future<String> _translateChunk(
     String chunk, {
+    required List<GlossaryEntry> terms,
+    required String continuity,
     required bool Function() shouldCancel,
     required void Function(String partialChunk) onStreamProgress,
   }) async {
+    final prompt = StringBuffer();
+    final glossary = _glossaryBlock(terms);
+    if (glossary.isNotEmpty) {
+      prompt
+        ..write(glossary)
+        ..write('\n');
+    }
+    if (continuity.isNotEmpty) {
+      prompt
+        ..writeln(
+          'END OF THE PREVIOUS PASSAGE, already translated. It is context '
+          'for tone and pronouns only — do not repeat or re-translate it:',
+        )
+        ..writeln(continuity)
+        ..writeln();
+    }
+    prompt
+      ..writeln(
+        'Translate the following novel text into English. Keep paragraph '
+        'breaks.',
+      )
+      ..writeln()
+      ..write(chunk);
+
     final response = await _dio.post<ResponseBody>(
       '/chat/completions',
       cancelToken: _cancelToken,
       data: {
         'model': model,
-        // International Kimi models require temperature == 1.
-        'temperature': 0.6,                // Instant mode uses 0.6
+        // Low temperature keeps naming and phrasing stable across chunks.
+        'temperature': 0.2,
+        'max_tokens': _maxOutputTokens,
         'stream': true,
-        'thinking': {'type': 'disabled'},  // ← this is Instant mode
+        'thinking': {'type': 'disabled'},
         'messages': [
           {'role': 'system', 'content': _systemPrompt},
-          {
-            'role': 'user',
-            'content':
-                'Translate the following novel text into English. '
-                'Keep paragraph breaks.\n\n$chunk',
-          },
+          {'role': 'user', 'content': prompt.toString()},
         ],
       },
       options: Options(
