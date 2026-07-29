@@ -26,6 +26,11 @@ class _BrowserScreenState extends State<BrowserScreen> {
   bool _canGoBack = false;
   bool _canGoForward = false;
 
+  /// Main-frame load failure for the navigation in flight. Held back until
+  /// the page settles, because a bad status often still renders a usable
+  /// page (bot checks) or is immediately superseded by a redirect.
+  String? _pendingError;
+
   static const _mobileChromeUA =
       'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 '
       '(KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36';
@@ -134,18 +139,45 @@ class _BrowserScreenState extends State<BrowserScreen> {
 
   void _showSnack(String message, {bool withRetry = false}) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message),
-        duration: Duration(seconds: withRetry ? 6 : 4),
-        action: withRetry
-            ? SnackBarAction(
-                label: 'Retry',
-                onPressed: () => _controller?.reload(),
-              )
-            : null,
-      ),
-    );
+    ScaffoldMessenger.of(context)
+      // Without this, a multi-hop navigation queues several snackbars and
+      // they keep reappearing long after the page has recovered.
+      ..removeCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(message),
+          duration: Duration(seconds: withRetry ? 6 : 4),
+          action: withRetry
+              ? SnackBarAction(
+                  label: 'Retry',
+                  onPressed: () => _controller?.reload(),
+                )
+              : null,
+        ),
+      );
+  }
+
+  /// Decides whether the failure recorded during this navigation is worth
+  /// telling the user about, now that the page has finished loading.
+  Future<void> _resolvePendingError(InAppWebViewController controller) async {
+    final message = _pendingError;
+    _pendingError = null;
+    if (message == null || !mounted) return;
+
+    try {
+      final state = parseExtractResult(
+        await controller.evaluateJavascript(source: kPageStateJs),
+      );
+      // A bot check is a working page the user has to complete, not an error.
+      if (state['challenge'] == true) return;
+      // The status was bad but the site rendered real content anyway.
+      if (((state['textLength'] as num?) ?? 0) >= 400) return;
+    } catch (_) {
+      // Probe failed, so the page really is unusable — fall through.
+    }
+
+    if (!mounted) return;
+    _showSnack(message, withRetry: true);
   }
 
   @override
@@ -294,6 +326,8 @@ class _BrowserScreenState extends State<BrowserScreen> {
                     },
                     onLoadStart: (controller, url) {
                       if (!mounted) return;
+                      _pendingError = null;
+                      ScaffoldMessenger.of(context).removeCurrentSnackBar();
                       setState(() {
                         _loading = true;
                         if (url != null) {
@@ -317,6 +351,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
                       });
                       await StorageService.instance.setLastUrl(_currentUrl);
                       await _updateNav();
+                      await _resolvePendingError(controller);
                     },
                     onUpdateVisitedHistory: (controller, url, isReload) {
                       if (!mounted) return;
@@ -331,24 +366,25 @@ class _BrowserScreenState extends State<BrowserScreen> {
                     },
                     onReceivedError: (controller, request, error) {
                       if (!mounted) return;
-                      if (request.isForMainFrame ?? false) {
-                        setState(() => _loading = false);
-                        _showSnack(
-                          'Page failed to load.',
-                          withRetry: true,
-                        );
+                      if (!(request.isForMainFrame ?? false)) return;
+                      // A cancelled load is normal during redirect chains.
+                      if (error.type
+                          .toString()
+                          .toUpperCase()
+                          .contains('CANCEL')) {
+                        return;
                       }
+                      setState(() => _loading = false);
+                      _pendingError = 'Page failed to load.';
                     },
                     onReceivedHttpError: (controller, request, response) {
                       if (!mounted) return;
                       final code = response.statusCode ?? 0;
-                      if ((request.isForMainFrame ?? false) && code >= 400) {
-                        setState(() => _loading = false);
-                        _showSnack(
-                          'Page error ($code).',
-                          withRetry: true,
-                        );
+                      if (!(request.isForMainFrame ?? false) || code < 400) {
+                        return;
                       }
+                      setState(() => _loading = false);
+                      _pendingError = 'Page error ($code).';
                     },
                   ),
           ),

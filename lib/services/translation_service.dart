@@ -98,13 +98,10 @@ class TranslationService {
   static final Map<String, String> _titleCache = <String, String>{};
   static const String model = 'kimi-k2.6';
 
-  /// Larger chunks mean fewer seams where the model can re-decide a name.
-  /// Streaming means this does not delay the first visible text; the ceiling
-  /// is [_maxOutputTokens], which the English output must comfortably fit in.
-  static const int _chunkChars = 5000;
-
-  /// Explicit so a long chunk can never be silently truncated mid-chapter.
-  static const int _maxOutputTokens = 8192;
+  /// The English output has to fit the server's default output limit, so
+  /// this stays at the size that is known to complete reliably. The glossary
+  /// is what keeps naming consistent across the extra seams.
+  static const int _chunkChars = 3000;
 
   /// Upper bound on how much of a chapter is sent for glossary extraction.
   static const int _glossarySampleChars = 12000;
@@ -503,11 +500,7 @@ class TranslationService {
         if (!retryable || attempt >= retryLimit) {
           final msg = status == 429
               ? 'Rate limit reached. Try again shortly.'
-              : e.response?.data is Map
-                  ? (e.response?.data['error']?['message']?.toString() ??
-                      e.message ??
-                      'network error')
-                  : (e.message ?? 'network error');
+              : await _describeApiError(e);
           throw TranslationChunkFailure(index, total, msg);
         }
         await _waitBeforeRetry(_retryDelay(e, attempt), shouldCancel);
@@ -532,11 +525,57 @@ class TranslationService {
     );
   }
 
+  /// Pulls the API's own error text out of a failed request.
+  ///
+  /// Chunk requests are streamed, so Dio hands back an undecoded
+  /// [ResponseBody] rather than a parsed map — without draining it here the
+  /// user only ever sees Dio's generic "status code 400" boilerplate, which
+  /// says nothing about which field the server rejected.
+  Future<String> _describeApiError(DioException e) async {
+    final data = e.response?.data;
+    String? body;
+
+    if (data is Map) {
+      final message = data['error']?['message'] ?? data['message'];
+      if (message != null) return message.toString();
+    } else if (data is String) {
+      body = data;
+    } else if (data is ResponseBody) {
+      try {
+        final bytes = <int>[];
+        await for (final part in data.stream) {
+          bytes.addAll(part);
+          if (bytes.length > 8192) break;
+        }
+        body = utf8.decode(bytes, allowMalformed: true);
+      } catch (_) {
+        body = null;
+      }
+    }
+
+    if (body != null && body.trim().isNotEmpty) {
+      try {
+        final decoded = jsonDecode(body);
+        if (decoded is Map) {
+          final message = decoded['error']?['message'] ?? decoded['message'];
+          if (message != null) return message.toString();
+        }
+      } catch (_) {
+        // Not JSON — fall through and show the raw body.
+      }
+      final trimmed = body.trim();
+      return trimmed.length > 300 ? trimmed.substring(0, 300) : trimmed;
+    }
+
+    final status = e.response?.statusCode;
+    if (status != null) return 'Server rejected the request (HTTP $status).';
+    return e.message ?? 'network error';
+  }
+
   Future<void> _waitBeforeRetry(
     Duration delay,
     bool Function() shouldCancel,
-  ) async {
-    await Future.any<void>([
+  ) async {    await Future.any<void>([
       Future<void>.delayed(delay),
       _cancelToken.whenCancel.then<void>((_) {}),
     ]);
@@ -633,7 +672,6 @@ class TranslationService {
         'model': model,
         // Low temperature keeps naming and phrasing stable across chunks.
         'temperature': 0.2,
-        'max_tokens': _maxOutputTokens,
         'stream': true,
         'thinking': {'type': 'disabled'},
         'messages': [

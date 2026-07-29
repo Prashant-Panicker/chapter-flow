@@ -240,3 +240,47 @@ const String kExtractChapterJs = r"""
   });
 })();
 """;
+
+/// Probes what the page actually rendered.
+///
+/// Needed because an HTTP status alone is a bad failure signal: Cloudflare
+/// and similar bot checks serve their interstitial with 403/503, yet the page
+/// is working and the user is expected to interact with it.
+const String kPageStateJs = r"""
+(function () {
+  try {
+    var title = (document.title || '').toLowerCase();
+    var challenge = false;
+
+    var markers = [
+      '#challenge-form', '#challenge-running', '#cf-challenge-running',
+      '#challenge-stage', '.cf-browser-verification', '#cf-wrapper',
+      'iframe[src*="challenges.cloudflare.com"]',
+      'iframe[src*="recaptcha"]', 'iframe[src*="hcaptcha"]',
+      'form[action*="captcha"]'
+    ];
+    for (var i = 0; i < markers.length; i++) {
+      if (document.querySelector(markers[i])) { challenge = true; break; }
+    }
+
+    if (!challenge) {
+      var phrases = [
+        'just a moment', 'attention required', 'checking your browser',
+        'security check', 'ddos-guard', 'verify you are human',
+        'verifying you are human', '请稍候', '安全检查', '人机验证'
+      ];
+      for (var j = 0; j < phrases.length; j++) {
+        if (title.indexOf(phrases[j]) >= 0) { challenge = true; break; }
+      }
+    }
+
+    var text = document.body ? (document.body.innerText || '').trim() : '';
+    return JSON.stringify({
+      challenge: challenge,
+      textLength: text.length
+    });
+  } catch (e) {
+    return JSON.stringify({ challenge: false, textLength: 0 });
+  }
+})();
+""";
