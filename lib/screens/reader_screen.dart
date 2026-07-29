@@ -66,6 +66,10 @@ class _ReaderScreenState extends State<ReaderScreen>
   TranslationService? _prefetchTranslator;
   Completer<Map<String, dynamic>>? _prefetchExtractionCompleter;
   HeadlessInAppWebView? _prefetchWebView;
+  Timer? _translationUiTimer;
+  String? _pendingTranslatedText;
+  int _pendingChunkCurrent = 0;
+  int _pendingChunkTotal = 0;
   int _chunkCurrent = 0;
   int _chunkTotal = 0;
   double _fontSize = 17;
@@ -78,6 +82,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     _activeTranslator?.cancel();
     _prefetchTranslator?.cancel();
     _prefetchWebView?.dispose();
+    _translationUiTimer?.cancel();
     super.dispose();
   }
 
@@ -102,10 +107,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       return;
     }
 
-    if (state == AppLifecycleState.inactive ||
-        state == AppLifecycleState.hidden ||
-        state == AppLifecycleState.paused ||
-        state == AppLifecycleState.detached) {
+    if (state == AppLifecycleState.detached) {
       _appInBackground = true;
       if (_translating) {
         _resumeTranslation = true;
@@ -182,6 +184,8 @@ class _ReaderScreenState extends State<ReaderScreen>
       return;
     }
     _activeTranslator = translator;
+    _translationUiTimer?.cancel();
+    _pendingTranslatedText = null;
 
     setState(() {
       _translating = true;
@@ -196,15 +200,12 @@ class _ReaderScreenState extends State<ReaderScreen>
         rawText: _rawText,
         shouldCancel: () => _cancelRequested,
         onProgress: (current, total, partial) {
-          if (!mounted) return;
-          setState(() {
-            _chunkCurrent = current;
-            _chunkTotal = total;
-            _translatedText = partial;
-          });
+          _queueTranslationProgress(current, total, partial);
         },
       );
       if (!mounted) return;
+      _translationUiTimer?.cancel();
+      _pendingTranslatedText = null;
       setState(() => _translatedText = result);
       await _saveChapter();
       if (_continuousEnabled) {
@@ -248,6 +249,29 @@ class _ReaderScreenState extends State<ReaderScreen>
         _activeTranslator = null;
       }
     }
+  }
+
+  void _queueTranslationProgress(int current, int total, String partial) {
+    _pendingChunkCurrent = current;
+    _pendingChunkTotal = total;
+    _pendingTranslatedText = partial;
+    if (_translationUiTimer?.isActive ?? false) return;
+
+    _translationUiTimer = Timer(
+      const Duration(milliseconds: 100),
+      _flushTranslationProgress,
+    );
+  }
+
+  void _flushTranslationProgress() {
+    final partial = _pendingTranslatedText;
+    if (!mounted || partial == null) return;
+    _pendingTranslatedText = null;
+    setState(() {
+      _chunkCurrent = _pendingChunkCurrent;
+      _chunkTotal = _pendingChunkTotal;
+      _translatedText = partial;
+    });
   }
 
   void _cancelTranslation() {
