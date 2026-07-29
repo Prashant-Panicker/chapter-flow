@@ -36,6 +36,10 @@ class ReaderScreen extends StatefulWidget {
 }
 
 class _ReaderScreenState extends State<ReaderScreen> {
+  static const _mobileChromeUA =
+      'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 '
+      '(KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36';
+
   late String _url;
   late String _pageTitle;
   late String _rawText;
@@ -49,9 +53,22 @@ class _ReaderScreenState extends State<ReaderScreen> {
   bool _busy = false;
   bool _translating = false;
   bool _cancelRequested = false;
+  bool _prefetching = false;
+  bool _prefetchCancelRequested = false;
+  String? _prefetchUrl;
+  Future<void>? _prefetchFuture;
+  HeadlessInAppWebView? _prefetchWebView;
   int _chunkCurrent = 0;
   int _chunkTotal = 0;
   double _fontSize = 17;
+
+  @override
+  void dispose() {
+    _cancelRequested = true;
+    _prefetchCancelRequested = true;
+    _prefetchWebView?.dispose();
+    super.dispose();
+  }
 
   @override
   void initState() {
@@ -77,13 +94,19 @@ class _ReaderScreenState extends State<ReaderScreen> {
     });
     if (_continuousEnabled && _translatedText.isEmpty) {
       await _startTranslation();
+    } else if (_continuousEnabled) {
+      _prefetchFuture = _prefetchNextChapter();
     }
   }
 
-  Future<TranslationService?> _buildTranslator() async {
+  Future<TranslationService?> _buildTranslator({
+    bool showMissingKeyMessage = true,
+  }) async {
     final key = await StorageService.instance.getApiKey();
     if (key == null || key.isEmpty) {
-      _showSnack('Add your Moonshot API key in Settings to translate.');
+      if (showMissingKeyMessage) {
+        _showSnack('Add your Moonshot API key in Settings to translate.');
+      }
       return null;
     }
     return TranslationService(apiKey: key);
@@ -120,6 +143,9 @@ class _ReaderScreenState extends State<ReaderScreen> {
       if (!mounted) return;
       setState(() => _translatedText = result);
       await _saveChapter();
+      if (_continuousEnabled) {
+        _prefetchFuture = _prefetchNextChapter();
+      }
     } on TranslationCancelledException {
       _showSnack(
         _chunkCurrent > 0
@@ -160,6 +186,19 @@ class _ReaderScreenState extends State<ReaderScreen> {
     setState(() => _cancelRequested = true);
   }
 
+  Future<void> _setContinuousEnabled(bool enabled) async {
+    setState(() => _continuousEnabled = enabled);
+    await StorageService.instance.setContinuousEnabled(enabled);
+    if (enabled && _translatedText.isEmpty && !_translating) {
+      _startTranslation();
+    } else if (enabled && !_prefetching) {
+      _prefetchFuture = _prefetchNextChapter();
+    } else if (!enabled && _translating) {
+      _cancelTranslation();
+    }
+    if (!enabled) _prefetchCancelRequested = true;
+  }
+
   String _guessBookTitle() {
     final parts = _pageTitle.split(RegExp(r'\s*[-–_|]\s*'));
     if (parts.length >= 2 && parts.first.trim().length > 1) {
@@ -186,6 +225,118 @@ class _ReaderScreenState extends State<ReaderScreen> {
       tocUrl: _tocUrl,
     );
     await StorageService.instance.saveChapter(chapter);
+  }
+
+  Future<void> _prefetchNextChapter() async {
+    final nextUrl = _nextUrl;
+    if (_prefetching || nextUrl == null || nextUrl == _url) return;
+    final cached = StorageService.instance.getChapter(nextUrl);
+    if (cached != null && cached.translatedText.isNotEmpty) return;
+
+    final translator = await _buildTranslator(showMissingKeyMessage: false);
+    if (translator == null || !mounted || !_continuousEnabled) return;
+
+    setState(() {
+      _prefetching = true;
+      _prefetchCancelRequested = false;
+      _prefetchUrl = nextUrl;
+    });
+
+    try {
+      final data = await _extractInBackground(nextUrl);
+      if (_prefetchCancelRequested || !_continuousEnabled) return;
+
+      final rawText = (data['bodyText'] as String? ?? '').trim();
+      final translatedText = await translator.translateChapter(
+        rawText: rawText,
+        shouldCancel: () => _prefetchCancelRequested || !_continuousEnabled,
+        onProgress: (_, __, ___) {},
+      );
+      if (_prefetchCancelRequested || !_continuousEnabled) return;
+
+      final pageTitle = data['pageTitle'] as String? ?? '';
+      final uri = Uri.tryParse(nextUrl);
+      await StorageService.instance.saveChapter(
+        Chapter(
+          id: nextUrl,
+          url: nextUrl,
+          bookTitle: _guessBookTitle(),
+          chapterTitle: pageTitle.isEmpty ? nextUrl : pageTitle,
+          rawText: rawText,
+          translatedText: translatedText,
+          savedAt: DateTime.now(),
+          lastReadAt: DateTime.now(),
+          sourceDomain: uri?.host ?? '',
+          prevUrl: data['prevUrl'] as String?,
+          nextUrl: data['nextUrl'] as String?,
+          tocUrl: data['tocUrl'] as String?,
+        ),
+      );
+    } on TranslationCancelledException {
+      // Expected when continuous translation is disabled or the reader closes.
+    } catch (e) {
+      if (mounted && !_prefetchCancelRequested) {
+        _showSnack('Next chapter could not be prepared: $e');
+      }
+    } finally {
+      await _prefetchWebView?.dispose();
+      _prefetchWebView = null;
+      if (mounted) {
+        setState(() {
+          _prefetching = false;
+          _prefetchUrl = null;
+        });
+      }
+    }
+  }
+
+  Future<Map<String, dynamic>> _extractInBackground(String url) async {
+    final completer = Completer<Map<String, dynamic>>();
+    var extracting = false;
+
+    _prefetchWebView = HeadlessInAppWebView(
+      initialUrlRequest: URLRequest(url: WebUri(url)),
+      initialSettings: InAppWebViewSettings(
+        userAgent: _mobileChromeUA,
+        javaScriptEnabled: true,
+        cacheEnabled: true,
+        databaseEnabled: true,
+        domStorageEnabled: true,
+        thirdPartyCookiesEnabled: true,
+      ),
+      onLoadStop: (controller, _) async {
+        if (extracting || completer.isCompleted) return;
+        extracting = true;
+        try {
+          for (var attempt = 0; attempt < 15; attempt++) {
+            if (_prefetchCancelRequested) {
+              throw TranslationCancelledException();
+            }
+            final raw = await controller.evaluateJavascript(
+              source: kExtractChapterJs,
+            );
+            final data = parseExtractResult(raw);
+            if ((data['bodyText'] as String? ?? '').trim().length >= 40) {
+              completer.complete(data);
+              return;
+            }
+            await Future<void>.delayed(const Duration(milliseconds: 400));
+          }
+          throw StateError('Next chapter text did not appear');
+        } catch (e, stackTrace) {
+          if (!completer.isCompleted) completer.completeError(e, stackTrace);
+        }
+      },
+      onReceivedError: (_, request, error) {
+        if ((request.isForMainFrame ?? false) && !completer.isCompleted) {
+          completer.completeError(
+            StateError('Failed to load next chapter: ${error.description}'),
+          );
+        }
+      },
+    );
+    await _prefetchWebView!.run();
+    return completer.future.timeout(const Duration(seconds: 30));
   }
 
   Future<void> _navigate(String targetUrl) async {
@@ -223,13 +374,27 @@ class _ReaderScreenState extends State<ReaderScreen> {
             _prevUrl = data['prevUrl'] as String?;
             _nextUrl = data['nextUrl'] as String?;
             _tocUrl = data['tocUrl'] as String?;
-            _busy = false;
           });
-          final cached = StorageService.instance.getChapter(targetUrl);
+          var cached = StorageService.instance.getChapter(targetUrl);
+          if ((cached == null || cached.translatedText.isEmpty) &&
+              _prefetchUrl == targetUrl) {
+            await _prefetchFuture;
+            cached = StorageService.instance.getChapter(targetUrl);
+          }
+          if (!mounted) return;
           if (cached != null && cached.translatedText.isNotEmpty) {
-            setState(() => _translatedText = cached.translatedText);
+            setState(() {
+              _translatedText = cached!.translatedText;
+              _busy = false;
+            });
+            if (_continuousEnabled) {
+              _prefetchFuture = _prefetchNextChapter();
+            }
           } else if (_continuousEnabled) {
             await _startTranslation();
+            if (mounted) setState(() => _busy = false);
+          } else {
+            setState(() => _busy = false);
           }
           return;
         }
@@ -347,64 +512,6 @@ class _ReaderScreenState extends State<ReaderScreen> {
       ),
       body: Column(
         children: [
-          // Continuous translate control — compact status strip
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.fromLTRB(16, 10, 8, 10),
-            decoration: const BoxDecoration(
-              color: AppTheme.surface,
-              border: Border(bottom: BorderSide(color: AppTheme.border)),
-            ),
-            child: Row(
-              children: [
-                Container(
-                  width: 8,
-                  height: 8,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: _continuousEnabled
-                        ? AppTheme.success
-                        : AppTheme.textSecondary.withValues(alpha: 0.4),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                const Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Continuous translate',
-                        style: TextStyle(
-                          fontWeight: FontWeight.w600,
-                          fontSize: 14,
-                        ),
-                      ),
-                      Text(
-                        'Auto-translates each chapter when you tap Next',
-                        style: TextStyle(
-                          color: AppTheme.textSecondary,
-                          fontSize: 12,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                Switch(
-                  value: _continuousEnabled,
-                  onChanged: (val) async {
-                    setState(() => _continuousEnabled = val);
-                    await StorageService.instance.setContinuousEnabled(val);
-                    if (val && _translatedText.isEmpty && !_translating) {
-                      _startTranslation();
-                    } else if (!val && _translating) {
-                      _cancelTranslation();
-                    }
-                  },
-                ),
-              ],
-            ),
-          ),
-
           if (_translating)
             Container(
               width: double.infinity,
@@ -486,7 +593,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
                           ),
                           const SizedBox(height: 6),
                           const Text(
-                            'Turn on Continuous translate or tap the button above.',
+                            'Turn on Auto or tap the button above.',
                             style: TextStyle(
                               color: AppTheme.textSecondary,
                               fontSize: 13,
@@ -523,6 +630,11 @@ class _ReaderScreenState extends State<ReaderScreen> {
         hasPrev: _prevUrl != null,
         hasNext: _nextUrl != null,
         hasToc: _tocUrl != null,
+        autoTranslateEnabled: _continuousEnabled,
+        autoTranslateBusy: _prefetching,
+        onAutoTranslateChanged: (enabled) {
+          _setContinuousEnabled(enabled);
+        },
         busy: _busy || _translating,
         onPrev: () {
           if (_prevUrl == null) {

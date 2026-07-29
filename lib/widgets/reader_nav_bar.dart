@@ -12,6 +12,9 @@ class ReaderNavBar extends StatelessWidget {
     required this.onPrev,
     required this.onNext,
     required this.onToc,
+    required this.autoTranslateEnabled,
+    required this.autoTranslateBusy,
+    required this.onAutoTranslateChanged,
     this.busy = false,
   });
 
@@ -21,6 +24,9 @@ class ReaderNavBar extends StatelessWidget {
   final VoidCallback onPrev;
   final VoidCallback onNext;
   final VoidCallback onToc;
+  final bool autoTranslateEnabled;
+  final bool autoTranslateBusy;
+  final ValueChanged<bool> onAutoTranslateChanged;
   final bool busy;
 
   @override
@@ -37,6 +43,14 @@ class ReaderNavBar extends StatelessWidget {
           ),
           child: Row(
             children: [
+              Expanded(
+                child: _ToggleButton(
+                  enabled: autoTranslateEnabled,
+                  busy: autoTranslateBusy,
+                  onChanged: onAutoTranslateChanged,
+                ),
+              ),
+              const SizedBox(width: 6),
               Expanded(
                 child: _NavButton(
                   icon: Icons.chevron_left_rounded,
@@ -66,6 +80,63 @@ class ReaderNavBar extends StatelessWidget {
                 ),
               ),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ToggleButton extends StatelessWidget {
+  const _ToggleButton({
+    required this.enabled,
+    required this.busy,
+    required this.onChanged,
+  });
+
+  final bool enabled;
+  final bool busy;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final foreground = enabled ? AppTheme.accent : AppTheme.textPrimary;
+
+    return Tooltip(
+      message: enabled ? 'Turn auto-translate off' : 'Turn auto-translate on',
+      child: Material(
+        color: enabled ? AppTheme.accentSoft : AppTheme.surfaceAlt,
+        borderRadius: BorderRadius.circular(12),
+        child: InkWell(
+          onTap: () => onChanged(!enabled),
+          borderRadius: BorderRadius.circular(12),
+          child: SizedBox(
+            height: 48,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                if (busy)
+                  SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: foreground,
+                    ),
+                  )
+                else
+                  Icon(Icons.translate_rounded, size: 18, color: foreground),
+                const SizedBox(width: 4),
+                Text(
+                  enabled ? 'Auto on' : 'Auto off',
+                  style: TextStyle(
+                    color: foreground,
+                    fontWeight: FontWeight.w600,
+                    fontSize: 13,
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),

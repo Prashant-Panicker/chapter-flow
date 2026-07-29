@@ -24,6 +24,15 @@ class MissingApiKeyException implements Exception {
       'No Moonshot API key found. Add your key in Settings.';
 }
 
+class ApiKeyValidationException implements Exception {
+  ApiKeyValidationException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
 const String _systemPrompt =
     'You are an expert translator specializing in Chinese web novels '
     '(Wuxia, Xianxia, Xuanhuan, and modern web fiction). Translate the '
@@ -51,6 +60,31 @@ class TranslationService {
   final Dio _dio;
   static const String model = 'kimi-k2.6';
   static const int _chunkChars = 1000;
+
+  /// Verifies authentication without consuming completion tokens.
+  Future<void> validateApiKey() async {
+    try {
+      final response = await _dio.get<Map<String, dynamic>>('/models');
+      final models = response.data?['data'];
+      if (models is! List) {
+        throw ApiKeyValidationException(
+          'Moonshot returned an unexpected validation response.',
+        );
+      }
+    } on ApiKeyValidationException {
+      rethrow;
+    } on DioException catch (e) {
+      final status = e.response?.statusCode;
+      if (status == 401 || status == 403) {
+        throw ApiKeyValidationException(
+          'Moonshot rejected this API key. Check the key and try again.',
+        );
+      }
+      throw ApiKeyValidationException(
+        'Could not verify the key with Moonshot. Check your connection and try again.',
+      );
+    }
+  }
 
   /// Splits raw source text into paragraph-respecting chunks.
   List<String> _chunk(String text) {
@@ -92,7 +126,7 @@ class TranslationService {
   /// Translates [rawText] chunk by chunk.
   ///
   /// [onProgress] receives (current 1-based, total, partial joined text).
-  /// [shouldCancel] is checked before each network call.
+  /// [shouldCancel] is checked before each call and during the response stream.
   Future<String> translateChapter({
     required String rawText,
     required void Function(int current, int total, String partialText)
@@ -113,6 +147,14 @@ class TranslationService {
         chunks[i],
         index: i,
         total: total,
+        shouldCancel: shouldCancel,
+        onStreamProgress: (partialChunk) {
+          onProgress(
+            i + 1,
+            total,
+            [...translatedParts, partialChunk].join('\n\n'),
+          );
+        },
       );
       translatedParts.add(translated);
       onProgress(i + 1, total, translatedParts.join('\n\n'));
@@ -125,12 +167,20 @@ class TranslationService {
     String chunk, {
     required int index,
     required int total,
+    required bool Function() shouldCancel,
+    required void Function(String partialChunk) onStreamProgress,
     int maxRetries = 2,
   }) async {
     Object? lastError;
     for (var attempt = 0; attempt <= maxRetries; attempt++) {
       try {
-        return await _translateChunk(chunk);
+        return await _translateChunk(
+          chunk,
+          shouldCancel: shouldCancel,
+          onStreamProgress: onStreamProgress,
+        );
+      } on TranslationCancelledException {
+        rethrow;
       } on DioException catch (e) {
         lastError = e;
         final status = e.response?.statusCode;
@@ -162,7 +212,11 @@ class TranslationService {
 
   /// Streaming version – tokens arrive continuously so the receiveTimeout
   /// is continuously refreshed and the old 3-minute abort no longer occurs.
-  Future<String> _translateChunk(String chunk) async {
+  Future<String> _translateChunk(
+    String chunk, {
+    required bool Function() shouldCancel,
+    required void Function(String partialChunk) onStreamProgress,
+  }) async {
     final response = await _dio.post<ResponseBody>(
       '/chat/completions',
       data: {
@@ -196,6 +250,9 @@ class TranslationService {
         .transform(const LineSplitter());
 
     await for (final line in stream) {
+      if (shouldCancel()) {
+        throw TranslationCancelledException();
+      }
       if (line.isEmpty) continue;
       if (!line.startsWith('data: ')) continue;
 
@@ -208,6 +265,7 @@ class TranslationService {
         final content = delta?['content'] as String?;
         if (content != null && content.isNotEmpty) {
           buffer.write(content);
+          onStreamProgress(buffer.toString());
         }
       } catch (_) {
         // Ignore keep-alive or malformed lines

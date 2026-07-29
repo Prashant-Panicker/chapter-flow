@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
 import '../services/storage_service.dart';
+import '../services/translation_service.dart';
 import '../theme/app_theme.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -16,6 +17,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _obscure = true;
   bool _hasKey = false;
   bool _saving = false;
+  String _savedKey = '';
 
   @override
   void initState() {
@@ -34,6 +36,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (!mounted) return;
     setState(() {
       _hasKey = key != null && key.isNotEmpty;
+      _savedKey = key ?? '';
       _controller.text = key ?? '';
     });
   }
@@ -45,13 +48,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
       return;
     }
     setState(() => _saving = true);
-    await StorageService.instance.setApiKey(value);
-    if (!mounted) return;
-    setState(() {
-      _hasKey = true;
-      _saving = false;
-    });
-    _showSnack('API key saved on this device.');
+    try {
+      await TranslationService(apiKey: value).validateApiKey();
+      await StorageService.instance.setApiKey(value);
+      if (!mounted) return;
+      setState(() {
+        _hasKey = true;
+        _savedKey = value;
+      });
+      _showSnack('API key verified and saved on this device.');
+    } on ApiKeyValidationException catch (e) {
+      _showSnack(e.message);
+    } catch (e) {
+      _showSnack('Could not save the API key: $e');
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
   }
 
   Future<void> _clearKey() async {
@@ -59,6 +71,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (!mounted) return;
     setState(() {
       _hasKey = false;
+      _savedKey = '';
       _controller.clear();
     });
     _showSnack('API key removed.');
@@ -109,6 +122,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final showingSavedKey =
+        _hasKey && _controller.text.trim() == _savedKey;
+
     return ListView(
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
       children: [
@@ -124,6 +140,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             TextField(
               controller: _controller,
               obscureText: _obscure,
+              onChanged: (_) => setState(() {}),
               style: const TextStyle(color: AppTheme.textPrimary),
               decoration: InputDecoration(
                 hintText: 'sk-…',
@@ -153,14 +170,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             color: Color(0xFF0B0D12),
                           ),
                         )
-                      : const Text('Save key'),
+                      : const Text('Verify & save'),
                 ),
                 if (_hasKey)
                   OutlinedButton(
                     onPressed: _clearKey,
                     child: const Text('Clear'),
                   ),
-                if (_hasKey)
+                if (showingSavedKey)
                   const Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [

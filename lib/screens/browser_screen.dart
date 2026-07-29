@@ -174,6 +174,26 @@ class _BrowserScreenState extends State<BrowserScreen> {
                   onSubmitted: _go,
                 ),
               ),
+              ValueListenableBuilder<TextEditingValue>(
+                valueListenable: _addressController,
+                builder: (context, value, _) => SizedBox(
+                  width: 32,
+                  height: 32,
+                  child: value.text.isEmpty
+                      ? null
+                      : IconButton(
+                          tooltip: 'Clear address',
+                          onPressed: _addressController.clear,
+                          visualDensity: VisualDensity.compact,
+                          padding: EdgeInsets.zero,
+                          icon: const Icon(
+                            Icons.close_rounded,
+                            size: 17,
+                            color: AppTheme.textSecondary,
+                          ),
+                        ),
+                ),
+              ),
               InkWell(
                 onTap: () => _go(_addressController.text),
                 borderRadius: BorderRadius.circular(8),
