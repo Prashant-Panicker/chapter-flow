@@ -135,7 +135,10 @@ class TranslationService {
         '/chat/completions',
         data: {
           'model': model,
-          'temperature': 0.3,
+          // 0.6 is the only value this model accepts; anything else is
+          // rejected with a 400. Consistency comes from the glossary, not
+          // from a lower temperature.
+          'temperature': 0.6,
           'thinking': {'type': 'disabled'},
           'messages': [
             {
@@ -232,7 +235,8 @@ class TranslationService {
         cancelToken: _cancelToken,
         data: {
           'model': model,
-          'temperature': 0.2,
+          // See _translateChunk: this model only accepts 0.6.
+          'temperature': 0.6,
           'thinking': {'type': 'disabled'},
           'messages': [
             {'role': 'system', 'content': _glossarySystemPrompt},
@@ -670,8 +674,9 @@ class TranslationService {
       cancelToken: _cancelToken,
       data: {
         'model': model,
-        // Low temperature keeps naming and phrasing stable across chunks.
-        'temperature': 0.2,
+        // This model rejects any other value with a 400 — do not "tune" it.
+        // Naming stability is enforced by the glossary instead.
+        'temperature': 0.6,
         'stream': true,
         'thinking': {'type': 'disabled'},
         'messages': [
