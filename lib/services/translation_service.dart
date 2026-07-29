@@ -58,8 +58,16 @@ class TranslationService {
         ));
 
   final Dio _dio;
+  final CancelToken _cancelToken = CancelToken();
+  static Future<void> _translationQueue = Future<void>.value();
   static const String model = 'kimi-k2.6';
-  static const int _chunkChars = 1000;
+  static const int _chunkChars = 3000;
+
+  void cancel() {
+    if (!_cancelToken.isCancelled) {
+      _cancelToken.cancel('Translation stopped');
+    }
+  }
 
   /// Verifies authentication without consuming completion tokens.
   Future<void> validateApiKey() async {
@@ -68,7 +76,7 @@ class TranslationService {
       final models = response.data?['data'];
       if (models is! List) {
         throw ApiKeyValidationException(
-          'Moonshot returned an unexpected validation response.',
+          'Could not verify key.',
         );
       }
     } on ApiKeyValidationException {
@@ -77,11 +85,11 @@ class TranslationService {
       final status = e.response?.statusCode;
       if (status == 401 || status == 403) {
         throw ApiKeyValidationException(
-          'Moonshot rejected this API key. Check the key and try again.',
+          'Invalid API key.',
         );
       }
       throw ApiKeyValidationException(
-        'Could not verify the key with Moonshot. Check your connection and try again.',
+        'Could not verify key. Check your connection.',
       );
     }
   }
@@ -132,6 +140,36 @@ class TranslationService {
     required void Function(int current, int total, String partialText)
         onProgress,
     required bool Function() shouldCancel,
+  }) {
+    return _enqueueTranslation(
+      () => _translateChapter(
+        rawText: rawText,
+        onProgress: onProgress,
+        shouldCancel: shouldCancel,
+      ),
+    );
+  }
+
+  Future<T> _enqueueTranslation<T>(Future<T> Function() operation) {
+    final result = Completer<T>();
+    _translationQueue = _translationQueue.then((_) async {
+      try {
+        if (_cancelToken.isCancelled) {
+          throw TranslationCancelledException();
+        }
+        result.complete(await operation());
+      } catch (error, stackTrace) {
+        result.completeError(error, stackTrace);
+      }
+    });
+    return result.future;
+  }
+
+  Future<String> _translateChapter({
+    required String rawText,
+    required void Function(int current, int total, String partialText)
+        onProgress,
+    required bool Function() shouldCancel,
   }) async {
     final chunks = _chunk(rawText);
     if (chunks.isEmpty) return '';
@@ -169,10 +207,12 @@ class TranslationService {
     required int total,
     required bool Function() shouldCancel,
     required void Function(String partialChunk) onStreamProgress,
-    int maxRetries = 2,
   }) async {
     Object? lastError;
-    for (var attempt = 0; attempt <= maxRetries; attempt++) {
+    for (var attempt = 0; attempt <= 4; attempt++) {
+      if (shouldCancel()) {
+        throw TranslationCancelledException();
+      }
       try {
         return await _translateChunk(
           chunk,
@@ -182,25 +222,37 @@ class TranslationService {
       } on TranslationCancelledException {
         rethrow;
       } on DioException catch (e) {
+        if (shouldCancel()) {
+          throw TranslationCancelledException();
+        }
         lastError = e;
         final status = e.response?.statusCode;
         final retryable =
             status == 429 || status == 500 || status == 502 || status == 503;
-        if (!retryable || attempt == maxRetries) {
-          final msg = e.response?.data is Map
-              ? (e.response?.data['error']?['message']?.toString() ??
-                  e.message ??
-                  'network error')
-              : (e.message ?? 'network error');
+        final retryLimit = status == 429 ? 4 : 2;
+        if (!retryable || attempt >= retryLimit) {
+          final msg = status == 429
+              ? 'Rate limit reached. Try again shortly.'
+              : e.response?.data is Map
+                  ? (e.response?.data['error']?['message']?.toString() ??
+                      e.message ??
+                      'network error')
+                  : (e.message ?? 'network error');
           throw TranslationChunkFailure(index, total, msg);
         }
-        await Future<void>.delayed(Duration(seconds: 2 * (attempt + 1)));
+        await _waitBeforeRetry(_retryDelay(e, attempt), shouldCancel);
       } catch (e) {
+        if (shouldCancel()) {
+          throw TranslationCancelledException();
+        }
         lastError = e;
-        if (attempt == maxRetries) {
+        if (attempt >= 2) {
           throw TranslationChunkFailure(index, total, e.toString());
         }
-        await Future<void>.delayed(Duration(seconds: 2 * (attempt + 1)));
+        await _waitBeforeRetry(
+          Duration(seconds: 2 * (attempt + 1)),
+          shouldCancel,
+        );
       }
     }
     throw TranslationChunkFailure(
@@ -208,6 +260,67 @@ class TranslationService {
       total,
       lastError?.toString() ?? 'Unknown error',
     );
+  }
+
+  Future<void> _waitBeforeRetry(
+    Duration delay,
+    bool Function() shouldCancel,
+  ) async {
+    await Future.any<void>([
+      Future<void>.delayed(delay),
+      _cancelToken.whenCancel.then<void>((_) {}),
+    ]);
+    if (shouldCancel() || _cancelToken.isCancelled) {
+      throw TranslationCancelledException();
+    }
+  }
+
+  Duration _retryDelay(DioException error, int attempt) {
+    final headers = error.response?.headers;
+    final retryAfter = headers?.value('retry-after');
+    final retryAfterDelay = _parseRetryAfter(retryAfter);
+    if (retryAfterDelay != null) return retryAfterDelay;
+
+    for (final name in const [
+      'x-ratelimit-reset-tokens',
+      'x-ratelimit-reset-requests',
+    ]) {
+      final resetDelay = _parseDuration(headers?.value(name));
+      if (resetDelay != null) return resetDelay;
+    }
+
+    if (error.response?.statusCode == 429) {
+      return Duration(seconds: attempt == 0 ? 30 : 60);
+    }
+    return Duration(seconds: 2 * (attempt + 1));
+  }
+
+  Duration? _parseRetryAfter(String? value) {
+    if (value == null) return null;
+    final seconds = int.tryParse(value.trim());
+    if (seconds != null) return Duration(seconds: seconds.clamp(1, 300));
+
+    final date = DateTime.tryParse(value);
+    if (date == null) return null;
+    final delay = date.toUtc().difference(DateTime.now().toUtc());
+    return Duration(
+      milliseconds: delay.inMilliseconds.clamp(1000, 300000),
+    );
+  }
+
+  Duration? _parseDuration(String? value) {
+    if (value == null || value.trim().isEmpty) return null;
+    final match = RegExp(
+      r'^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+(?:\.\d+)?)s)?$',
+    ).firstMatch(value.trim());
+    if (match == null) return null;
+    final hours = int.tryParse(match.group(1) ?? '') ?? 0;
+    final minutes = int.tryParse(match.group(2) ?? '') ?? 0;
+    final seconds = double.tryParse(match.group(3) ?? '') ?? 0;
+    final milliseconds =
+        ((hours * 3600 + minutes * 60 + seconds) * 1000).ceil();
+    if (milliseconds <= 0) return null;
+    return Duration(milliseconds: milliseconds.clamp(1000, 300000));
   }
 
   /// Streaming version – tokens arrive continuously so the receiveTimeout
@@ -219,6 +332,7 @@ class TranslationService {
   }) async {
     final response = await _dio.post<ResponseBody>(
       '/chat/completions',
+      cancelToken: _cancelToken,
       data: {
         'model': model,
         // International Kimi models require temperature == 1.

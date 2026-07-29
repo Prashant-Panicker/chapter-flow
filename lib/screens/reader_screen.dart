@@ -37,7 +37,8 @@ class ReaderScreen extends StatefulWidget {
   State<ReaderScreen> createState() => _ReaderScreenState();
 }
 
-class _ReaderScreenState extends State<ReaderScreen> {
+class _ReaderScreenState extends State<ReaderScreen>
+  with WidgetsBindingObserver {
   static const _mobileChromeUA =
       'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 '
       '(KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36';
@@ -57,8 +58,13 @@ class _ReaderScreenState extends State<ReaderScreen> {
   bool _cancelRequested = false;
   bool _prefetching = false;
   bool _prefetchCancelRequested = false;
+  bool _appInBackground = false;
+  bool _resumeTranslation = false;
   String? _prefetchUrl;
   Future<void>? _prefetchFuture;
+  TranslationService? _activeTranslator;
+  TranslationService? _prefetchTranslator;
+  Completer<Map<String, dynamic>>? _prefetchExtractionCompleter;
   HeadlessInAppWebView? _prefetchWebView;
   int _chunkCurrent = 0;
   int _chunkTotal = 0;
@@ -66,8 +72,11 @@ class _ReaderScreenState extends State<ReaderScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _cancelRequested = true;
     _prefetchCancelRequested = true;
+    _activeTranslator?.cancel();
+    _prefetchTranslator?.cancel();
     _prefetchWebView?.dispose();
     super.dispose();
   }
@@ -75,6 +84,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _url = widget.url;
     _pageTitle = widget.pageTitle;
     _rawText = widget.bodyText;
@@ -82,6 +92,49 @@ class _ReaderScreenState extends State<ReaderScreen> {
     _nextUrl = widget.nextUrl;
     _tocUrl = widget.tocUrl;
     _loadPrefsAndMaybeTranslate();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _appInBackground = false;
+      _resumeAfterBackground();
+      return;
+    }
+
+    if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.hidden ||
+        state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      _appInBackground = true;
+      if (_translating) {
+        _resumeTranslation = true;
+        _cancelRequested = true;
+        _activeTranslator?.cancel();
+      }
+      _prefetchCancelRequested = true;
+      _prefetchTranslator?.cancel();
+      final extraction = _prefetchExtractionCompleter;
+      if (extraction != null && !extraction.isCompleted) {
+        extraction.completeError(TranslationCancelledException());
+      }
+      _prefetchWebView?.dispose();
+    }
+  }
+
+  void _resumeAfterBackground() {
+    if (!mounted || _appInBackground) return;
+    if (_resumeTranslation && !_translating) {
+      _resumeTranslation = false;
+      _startTranslation(force: true);
+      return;
+    }
+    if (_continuousEnabled &&
+        _translatedText.isNotEmpty &&
+        !_translating &&
+        !_prefetching) {
+      _prefetchFuture = _prefetchNextChapter();
+    }
   }
 
   Future<void> _loadPrefsAndMaybeTranslate() async {
@@ -117,9 +170,18 @@ class _ReaderScreenState extends State<ReaderScreen> {
   Future<void> _startTranslation({bool force = false}) async {
     if (_translating) return;
     if (!force && _translatedText.isNotEmpty) return;
+    if (_appInBackground) {
+      _resumeTranslation = true;
+      return;
+    }
 
     final translator = await _buildTranslator();
     if (translator == null) return;
+    if (_appInBackground) {
+      _resumeTranslation = true;
+      return;
+    }
+    _activeTranslator = translator;
 
     setState(() {
       _translating = true;
@@ -149,11 +211,9 @@ class _ReaderScreenState extends State<ReaderScreen> {
         _prefetchFuture = _prefetchNextChapter();
       }
     } on TranslationCancelledException {
-      _showSnack(
-        _chunkCurrent > 0
-            ? 'Cancelled after $_chunkCurrent/$_chunkTotal chunks.'
-            : 'Translation cancelled.',
-      );
+      if (!_appInBackground && !_resumeTranslation) {
+        _showSnack('Translation stopped.');
+      }
     } on TranslationChunkFailure catch (e) {
       if (!mounted) return;
       final retry = await showDialog<bool>(
@@ -180,12 +240,19 @@ class _ReaderScreenState extends State<ReaderScreen> {
     } catch (e) {
       _showSnack('Translation error: $e');
     } finally {
-      if (mounted) setState(() => _translating = false);
+      if (mounted) {
+        setState(() => _translating = false);
+        _resumeAfterBackground();
+      }
+      if (identical(_activeTranslator, translator)) {
+        _activeTranslator = null;
+      }
     }
   }
 
   void _cancelTranslation() {
     setState(() => _cancelRequested = true);
+    _activeTranslator?.cancel();
   }
 
   Future<void> _setContinuousEnabled(bool enabled) async {
@@ -236,7 +303,13 @@ class _ReaderScreenState extends State<ReaderScreen> {
     if (cached != null && cached.translatedText.isNotEmpty) return;
 
     final translator = await _buildTranslator(showMissingKeyMessage: false);
-    if (translator == null || !mounted || !_continuousEnabled) return;
+    if (translator == null ||
+        !mounted ||
+        !_continuousEnabled ||
+        _appInBackground) {
+      return;
+    }
+    _prefetchTranslator = translator;
 
     setState(() {
       _prefetching = true;
@@ -278,22 +351,28 @@ class _ReaderScreenState extends State<ReaderScreen> {
       // Expected when continuous translation is disabled or the reader closes.
     } catch (e) {
       if (mounted && !_prefetchCancelRequested) {
-        _showSnack('Next chapter could not be prepared: $e');
+        _showSnack('Next chapter not ready.');
       }
     } finally {
       await _prefetchWebView?.dispose();
       _prefetchWebView = null;
+      _prefetchExtractionCompleter = null;
+      if (identical(_prefetchTranslator, translator)) {
+        _prefetchTranslator = null;
+      }
       if (mounted) {
         setState(() {
           _prefetching = false;
           _prefetchUrl = null;
         });
+        _resumeAfterBackground();
       }
     }
   }
 
   Future<Map<String, dynamic>> _extractInBackground(String url) async {
     final completer = Completer<Map<String, dynamic>>();
+    _prefetchExtractionCompleter = completer;
     var extracting = false;
 
     _prefetchWebView = HeadlessInAppWebView(
@@ -350,7 +429,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
       );
       await _waitForLoadThenExtract(targetUrl);
     } catch (e) {
-      _showSnack('Navigation failed: $e');
+      _showSnack('Navigation failed.');
       if (mounted) setState(() => _busy = false);
     }
   }
@@ -405,14 +484,14 @@ class _ReaderScreenState extends State<ReaderScreen> {
     if (mounted) {
       setState(() => _busy = false);
       _showSnack(
-        'Chapter text did not appear. Return to Browser and try Enter Reader again.',
+        'Chapter not found.',
       );
     }
   }
 
   Future<void> _openToc() async {
     if (_tocUrl == null) {
-      _showSnack('No table-of-contents link found on this page.');
+      _showSnack('TOC unavailable.');
       return;
     }
     await widget.webViewController.loadUrl(
@@ -527,8 +606,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
                       children: [
                         Text(
                           _chunkTotal == 0
-                              ? 'Starting translation…'
-                              : 'Translating chunk $_chunkCurrent of $_chunkTotal',
+                              ? 'Starting…'
+                              : 'Chunk $_chunkCurrent/$_chunkTotal',
                           style: const TextStyle(
                             fontWeight: FontWeight.w600,
                             fontSize: 13,
@@ -586,19 +665,10 @@ class _ReaderScreenState extends State<ReaderScreen> {
                           ),
                           const SizedBox(height: 12),
                           const Text(
-                            'Translation will appear here',
+                            'No translation',
                             style: TextStyle(
                               color: AppTheme.textSecondary,
                               fontSize: 15,
-                            ),
-                            textAlign: TextAlign.center,
-                          ),
-                          const SizedBox(height: 6),
-                          const Text(
-                            'Turn on Auto or tap the button above.',
-                            style: TextStyle(
-                              color: AppTheme.textSecondary,
-                              fontSize: 13,
                             ),
                             textAlign: TextAlign.center,
                           ),
@@ -640,14 +710,14 @@ class _ReaderScreenState extends State<ReaderScreen> {
         busy: _busy || _translating,
         onPrev: () {
           if (_prevUrl == null) {
-            _showSnack('No previous-chapter link found on this page.');
+            _showSnack('No previous chapter.');
             return;
           }
           _navigate(_prevUrl!);
         },
         onNext: () {
           if (_nextUrl == null) {
-            _showSnack('No next-chapter link found on this page.');
+            _showSnack('No next chapter.');
             return;
           }
           _navigate(_nextUrl!);

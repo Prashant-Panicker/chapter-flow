@@ -56,11 +56,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _hasKey = true;
         _savedKey = value;
       });
-      _showSnack('API key verified and saved on this device.');
+      _showSnack('API key saved.');
     } on ApiKeyValidationException catch (e) {
       _showSnack(e.message);
     } catch (e) {
-      _showSnack('Could not save the API key: $e');
+      _showSnack('Could not save key.');
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -82,9 +82,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
       await InAppWebViewController.clearAllCache();
       final cookieManager = CookieManager.instance();
       await cookieManager.deleteAllCookies();
-      _showSnack('WebView cache and cookies cleared.');
+      _showSnack('Browser data cleared.');
     } catch (e) {
-      _showSnack('Could not clear web data: $e');
+      _showSnack('Could not clear browser data.');
     }
   }
 
@@ -132,8 +132,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           title: 'Moonshot (Kimi) API key',
           children: [
             const Text(
-              'Stored encrypted on this device only. Calls go directly to '
-              'api.moonshot.ai with your key.',
+              'Encrypted on this device.',
               style: TextStyle(color: AppTheme.textSecondary, height: 1.4),
             ),
             const SizedBox(height: 12),
@@ -198,7 +197,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           title: 'Browser data',
           children: [
             const Text(
-              'Clear cookies and cache from the in-app browser (logs you out of novel sites).',
+              'Clears browser cookies and cache.',
               style: TextStyle(color: AppTheme.textSecondary, height: 1.4),
             ),
             const SizedBox(height: 12),
@@ -214,15 +213,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           title: 'About',
           children: const [
             Text(
-              'You browse and pass CAPTCHA/login manually. Continuous translate '
-              'keeps translating each chapter as you tap Next. Prev / TOC / Next '
-              'are app-owned so they never disappear the way browser reader mode '
-              'removes site controls.',
-              style: TextStyle(color: AppTheme.textSecondary, height: 1.45),
-            ),
-            SizedBox(height: 12),
-            Text(
-              'Version 0.2.1',
+              'ChapterFlow 0.2.1',
               style: TextStyle(color: AppTheme.textSecondary, fontSize: 12),
             ),
           ],

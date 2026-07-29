@@ -47,21 +47,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
               ),
               const SizedBox(height: 16),
               const Text(
-                'No saved chapters yet',
+                'No saved chapters',
                 style: TextStyle(
                   fontSize: 17,
                   fontWeight: FontWeight.w600,
                   color: AppTheme.textPrimary,
-                ),
-              ),
-              const SizedBox(height: 8),
-              const Text(
-                'Open Browser → load a chapter → Enter Reader → '
-                'translate. Finished chapters show up here for offline reading.',
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  color: AppTheme.textSecondary,
-                  height: 1.45,
                 ),
               ),
             ],

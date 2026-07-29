@@ -90,8 +90,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
 
       if (bodyText.length < 40) {
         _showSnack(
-          'No chapter text detected yet. Scroll so the chapter body is '
-          'visible, wait for the page to finish loading, then try again.',
+          'No chapter text found.',
         );
         return;
       }
@@ -113,7 +112,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
         ),
       );
     } catch (e) {
-      _showSnack('Could not extract chapter: $e');
+      _showSnack('Could not open reader.');
     } finally {
       if (mounted) setState(() => _extracting = false);
     }
@@ -316,7 +315,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
                       if (request.isForMainFrame ?? false) {
                         setState(() => _loading = false);
                         _showSnack(
-                          'Failed to load page: ${error.description}',
+                          'Page failed to load.',
                           withRetry: true,
                         );
                       }
@@ -326,7 +325,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
                       if ((request.isForMainFrame ?? false) && code >= 400) {
                         setState(() => _loading = false);
                         _showSnack(
-                          'Server error ($code) loading page.',
+                          'Page error ($code).',
                           withRetry: true,
                         );
                       }
