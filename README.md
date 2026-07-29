@@ -24,7 +24,22 @@ flutter create --org com.example --project-name chapterflow --platforms=ios .
 
 Pushing to `main` (or running the workflow manually) builds a release APK
 via `.github/workflows/build-apk.yml`, uploaded as the
-`chapterflow-release-apk` artifact.
+`chapterflow-release-apk` artifact. Doc-only commits are skipped.
+
+## App icon
+
+The launcher icon is generated, not committed by hand, so the per-density
+`mipmap-*` output can never drift from the artwork. Two pre-cropped 1024px
+squares live in `assets/icon/`:
+
+| File | Used for |
+| --- | --- |
+| `app_icon.png` | legacy launcher icon — tight crop |
+| `app_icon_foreground.png` | adaptive foreground — wider crop, so the artwork sits inside the mask's safe zone and can't be clipped |
+
+The build runs `dart run flutter_launcher_icons` before `flutter build`, so
+every CI run regenerates them. Run that same command locally after changing
+either asset.
 
 ## First run
 
