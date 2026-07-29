@@ -507,7 +507,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       try {
         final currentUrl =
             (await widget.webViewController.getUrl())?.toString();
-        final progress = await widget.webViewController.getProgress();
+        final progress = await widget.webViewController.getProgress() ?? 0;
         if (currentUrl == null ||
             _samePage(currentUrl, previousUrl) ||
             progress < 80) {
