@@ -18,7 +18,13 @@ class StorageService {
   static const _glossaryBoxName = 'glossaries';
   static const _keyLastUrl = 'last_url';
   static const _keyContinuousEnabled = 'continuous_translate_enabled';
+  static const _keyFontSize = 'reader_font_size';
   static const _secureApiKeyKey = 'moonshot_api_key';
+
+  /// Matches the clamp in both readers' text-size buttons.
+  static const double minFontSize = 14;
+  static const double maxFontSize = 28;
+  static const double defaultFontSize = 17;
 
   /// Bounds prompt-building work and storage for very long novels.
   static const _maxGlossaryEntries = 1500;
@@ -116,7 +122,7 @@ class StorageService {
   }
 
   /// Drops every stored chapter of [seriesKey] except [keepIds], so a series
-  /// never keeps more than the chapter being read plus its prefetched next.
+  /// never keeps more than the window around the chapter being read.
   Future<void> pruneSeries(
     String seriesKey, {
     required Set<String> keepIds,
@@ -130,11 +136,13 @@ class StorageService {
   }
 
   /// Applies the one-entry-per-series rule to everything already on disk,
-  /// keeping each series' last read chapter plus its prefetched next one.
+  /// keeping each series' last read chapter plus the one before and after it.
   Future<void> pruneAllSeries() async {
     final keep = <String>{};
     for (final entry in libraryEntries()) {
       keep.add(entry.id);
+      final prev = entry.prevUrl;
+      if (prev != null && prev.isNotEmpty) keep.add(prev);
       final next = entry.nextUrl;
       if (next != null && next.isNotEmpty) keep.add(next);
     }
@@ -192,6 +200,21 @@ class StorageService {
     );
   }
 
+  /// Remembers how far into a chapter you had read, stored as a 0..1
+  /// fraction rather than a pixel offset so it survives a font-size change
+  /// or a rotation. No-ops for a chapter that was never saved.
+  Future<void> saveReadingProgress(String url, double fraction) async {
+    final existing = _chaptersBox.get(url);
+    if (existing == null) return;
+    final clamped = fraction.clamp(0.0, 1.0);
+    // Avoids a Hive write on every scroll tick.
+    if ((existing.scrollPosition - clamped).abs() < 0.01) return;
+    await _chaptersBox.put(
+      url,
+      existing.copyWith(scrollPosition: clamped),
+    );
+  }
+
   // ---------------- Preferences ----------------
 
   Future<void> setLastUrl(String url) async {
@@ -215,6 +238,19 @@ class StorageService {
   Future<bool> getContinuousEnabled() async {
     final prefs = await SharedPreferences.getInstance();
     return prefs.getBool(_keyContinuousEnabled) ?? false;
+  }
+
+  /// Text size is a reader-wide preference, shared by the live and offline
+  /// readers, so it never has to be set twice.
+  Future<void> setFontSize(double size) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble(_keyFontSize, size);
+  }
+
+  Future<double> getFontSize() async {
+    final prefs = await SharedPreferences.getInstance();
+    final v = prefs.getDouble(_keyFontSize) ?? defaultFontSize;
+    return v.clamp(minFontSize, maxFontSize);
   }
 
   // ---------------- API key (secure, device-only) ----------------

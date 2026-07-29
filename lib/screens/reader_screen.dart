@@ -86,7 +86,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   int _continuousChangeId = 0;
   int _chunkCurrent = 0;
   int _chunkTotal = 0;
-  double _fontSize = 17;
+  double _fontSize = StorageService.defaultFontSize;
 
   @override
   void dispose() {
@@ -97,6 +97,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     _prefetchTranslator?.cancel();
     _prefetchWebView?.dispose();
     _translationUiTimer?.cancel();
+    _persistProgress();
     _scrollController.dispose();
     super.dispose();
   }
@@ -127,6 +128,9 @@ class _ReaderScreenState extends State<ReaderScreen>
       _resumeAfterBackground();
       return;
     }
+
+    // Leaving the app may be the last chance to record where you were.
+    _persistProgress();
 
     if (state == AppLifecycleState.detached) {
       _appInBackground = true;
@@ -162,14 +166,19 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   Future<void> _loadPrefsAndMaybeTranslate() async {
     final enabled = await StorageService.instance.getContinuousEnabled();
+    final fontSize = await StorageService.instance.getFontSize();
     final cached = StorageService.instance.getChapter(_url);
     if (!mounted) return;
     setState(() {
       _continuousEnabled = enabled;
+      _fontSize = fontSize;
       if (cached != null && cached.translatedText.isNotEmpty) {
         _translatedText = cached.translatedText;
       }
     });
+    if (cached != null && cached.translatedText.isNotEmpty) {
+      _restoreProgress(cached.scrollPosition);
+    }
     if (_continuousEnabled && _translatedText.isEmpty) {
       await _startTranslation();
     } else if (_continuousEnabled) {
@@ -441,13 +450,18 @@ class _ReaderScreenState extends State<ReaderScreen>
     }
   }
 
-  /// Keeps at most the chapter being read plus the prefetched next one, so
-  /// the library only ever surfaces the last read chapter of this novel.
+  /// Keeps a three-chapter window — the previous chapter, the one being
+  /// read, and the prefetched next one — so stepping back to re-read the end
+  /// of the last chapter never costs a re-translation.
   Future<void> _pruneCurrentSeries() async {
     if (_sourceBookTitle.isEmpty) return;
     await StorageService.instance.pruneSeries(
       _seriesKey,
-      keepIds: {_url, if (_nextUrl != null) _nextUrl!},
+      keepIds: {
+        _url,
+        if (_prevUrl != null) _prevUrl!,
+        if (_nextUrl != null) _nextUrl!,
+      },
     );
   }
 
@@ -627,6 +641,8 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   Future<void> _navigate(String targetUrl) async {
+    // Captures where you were before _url moves on to the new chapter.
+    _persistProgress();
     if (_translating) _cancelTranslation();
     if (_prefetching && _prefetchUrl != targetUrl) {
       _prefetchCancelRequested = true;
@@ -717,7 +733,7 @@ class _ReaderScreenState extends State<ReaderScreen>
               _englishBookTitle ??= cached.bookTitleEnglish;
               _busy = false;
             });
-            _scrollToTop();
+            _restoreProgress(cached.scrollPosition);
             await _pruneCurrentSeries();
             if (!mounted) return;
             if (_continuousEnabled) {
@@ -786,6 +802,43 @@ class _ReaderScreenState extends State<ReaderScreen>
     });
   }
 
+  /// Drops you back where you stopped reading a chapter you have already
+  /// seen. A freshly prefetched chapter has no saved position, so it lands
+  /// at the top like any other new chapter.
+  void _restoreProgress(double fraction) {
+    if (fraction <= 0) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scrollController.hasClients) return;
+      final max = _scrollController.position.maxScrollExtent;
+      if (max <= 0) return;
+      _scrollController.jumpTo((fraction * max).clamp(0, max));
+    });
+  }
+
+  /// Skipped while a translation is streaming in, because the text is still
+  /// growing and any fraction measured against it would be meaningless.
+  void _persistProgress() {
+    if (_translating || !_scrollController.hasClients) return;
+    final max = _scrollController.position.maxScrollExtent;
+    if (max <= 0) return;
+    unawaited(
+      StorageService.instance.saveReadingProgress(
+        _url,
+        (_scrollController.offset / max).clamp(0.0, 1.0),
+      ),
+    );
+  }
+
+  Future<void> _setFontSize(double size) async {
+    final clamped = size.clamp(
+      StorageService.minFontSize,
+      StorageService.maxFontSize,
+    );
+    if (clamped == _fontSize) return;
+    setState(() => _fontSize = clamped);
+    await StorageService.instance.setFontSize(clamped);
+  }
+
   String get _displayText {
     switch (_viewMode) {
       case ReaderViewMode.english:
@@ -838,14 +891,12 @@ class _ReaderScreenState extends State<ReaderScreen>
         actions: [
           IconButton(
             tooltip: 'Smaller text',
-            onPressed: () =>
-                setState(() => _fontSize = (_fontSize - 1).clamp(14, 28)),
+            onPressed: () => _setFontSize(_fontSize - 1),
             icon: const Icon(Icons.text_decrease, size: 20),
           ),
           IconButton(
             tooltip: 'Larger text',
-            onPressed: () =>
-                setState(() => _fontSize = (_fontSize + 1).clamp(14, 28)),
+            onPressed: () => _setFontSize(_fontSize + 1),
             icon: const Icon(Icons.text_increase, size: 20),
           ),
           PopupMenuButton<ReaderViewMode>(

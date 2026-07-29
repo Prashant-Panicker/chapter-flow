@@ -40,11 +40,22 @@ flutter create --org com.example --project-name chapterflow --platforms=ios .
    following one is fetched in the background so it's ready when you reach
    it.
 
+## Reading
+
+The reader remembers how far into a chapter you got, so closing the app or
+stepping back to an earlier chapter drops you where you stopped rather than
+at the top. Position is stored as a proportion of the chapter, so it stays
+right even if you change the text size afterwards.
+
+Text size is a single setting shared by both readers — set it once.
+
 ## Library
 
 The library holds one card per novel, showing the last chapter you actually
-read. Older chapters are cleaned up automatically so saved data doesn't grow
-without bound.
+read. Around it the app keeps a small window — the previous chapter, the
+current one, and the next — so flipping back to re-read the end of the last
+chapter is instant and never costs another translation. Anything outside
+that window is cleaned up so saved data doesn't grow without bound.
 
 Opening a card gives you the same Prev / TOC / Next controls as the live
 reader. A chapter that's still saved opens instantly with no connection; if

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../main.dart' show rootTabIndex;
@@ -17,21 +19,80 @@ class OfflineReaderScreen extends StatefulWidget {
   State<OfflineReaderScreen> createState() => _OfflineReaderScreenState();
 }
 
-class _OfflineReaderScreenState extends State<OfflineReaderScreen> {
+class _OfflineReaderScreenState extends State<OfflineReaderScreen>
+    with WidgetsBindingObserver {
+  final ScrollController _scrollController = ScrollController();
   _OfflineViewMode _mode = _OfflineViewMode.english;
-  double _fontSize = 17;
+  double _fontSize = StorageService.defaultFontSize;
   bool _continuousEnabled = false;
+  bool _restoredPosition = false;
 
   @override
   void initState() {
     super.initState();
-    _loadContinuousPref();
+    WidgetsBinding.instance.addObserver(this);
+    _loadPrefs();
   }
 
-  Future<void> _loadContinuousPref() async {
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _persistProgress();
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Leaving the app may be the last chance to record where you were.
+    if (state != AppLifecycleState.resumed) _persistProgress();
+  }
+
+  Future<void> _loadPrefs() async {
     final enabled = await StorageService.instance.getContinuousEnabled();
+    final fontSize = await StorageService.instance.getFontSize();
     if (!mounted) return;
-    setState(() => _continuousEnabled = enabled);
+    setState(() {
+      _continuousEnabled = enabled;
+      _fontSize = fontSize;
+    });
+    _restoreProgress();
+  }
+
+  /// Drops you back where you stopped reading. Runs after a frame so the
+  /// scroll extent reflects the laid-out text.
+  void _restoreProgress() {
+    final fraction = widget.chapter.scrollPosition;
+    if (_restoredPosition || fraction <= 0) return;
+    _restoredPosition = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scrollController.hasClients) return;
+      final max = _scrollController.position.maxScrollExtent;
+      if (max <= 0) return;
+      _scrollController.jumpTo((fraction * max).clamp(0, max));
+    });
+  }
+
+  void _persistProgress() {
+    if (!_scrollController.hasClients) return;
+    final max = _scrollController.position.maxScrollExtent;
+    if (max <= 0) return;
+    unawaited(
+      StorageService.instance.saveReadingProgress(
+        widget.chapter.url,
+        (_scrollController.offset / max).clamp(0.0, 1.0),
+      ),
+    );
+  }
+
+  Future<void> _setFontSize(double size) async {
+    final clamped = size.clamp(
+      StorageService.minFontSize,
+      StorageService.maxFontSize,
+    );
+    if (clamped == _fontSize) return;
+    setState(() => _fontSize = clamped);
+    await StorageService.instance.setFontSize(clamped);
   }
 
   Future<void> _setContinuousEnabled(bool enabled) async {
@@ -44,6 +105,7 @@ class _OfflineReaderScreenState extends State<OfflineReaderScreen> {
   /// only exists on the Browser tab.
   Future<void> _follow(String? url, {required String label}) async {
     if (url == null || url.isEmpty) return;
+    _persistProgress();
 
     final saved = StorageService.instance.getChapter(url);
     if (saved != null && saved.translatedText.isNotEmpty) {
@@ -118,14 +180,12 @@ class _OfflineReaderScreenState extends State<OfflineReaderScreen> {
         actions: [
           IconButton(
             tooltip: 'Smaller text',
-            onPressed: () =>
-                setState(() => _fontSize = (_fontSize - 1).clamp(14, 28)),
+            onPressed: () => _setFontSize(_fontSize - 1),
             icon: const Icon(Icons.text_decrease, size: 20),
           ),
           IconButton(
             tooltip: 'Larger text',
-            onPressed: () =>
-                setState(() => _fontSize = (_fontSize + 1).clamp(14, 28)),
+            onPressed: () => _setFontSize(_fontSize + 1),
             icon: const Icon(Icons.text_increase, size: 20),
           ),
           PopupMenuButton<_OfflineViewMode>(
@@ -151,6 +211,7 @@ class _OfflineReaderScreenState extends State<OfflineReaderScreen> {
       ),
       body: SelectionArea(
         child: SingleChildScrollView(
+          controller: _scrollController,
           padding: const EdgeInsets.fromLTRB(20, 16, 20, 40),
           child: Center(
             child: ConstrainedBox(
