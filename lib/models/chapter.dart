@@ -7,7 +7,17 @@ class Chapter {
   final String id;
   final String url;
   final String bookTitle;
+
+  /// Book title rendered in English. Falls back to [bookTitle] when the
+  /// source title could not be translated.
+  final String? bookTitleEnglish;
   final String chapterTitle;
+
+  /// Chapter heading rendered in English, when it could be translated.
+  final String? chapterTitleEnglish;
+
+  /// Chapter number parsed from the page (e.g. "1024"), when detectable.
+  final String? chapterNumber;
   final String rawText;
   final String translatedText;
   final double scrollPosition;
@@ -22,7 +32,10 @@ class Chapter {
     required this.id,
     required this.url,
     required this.bookTitle,
+    this.bookTitleEnglish,
     required this.chapterTitle,
+    this.chapterTitleEnglish,
+    this.chapterNumber,
     required this.rawText,
     required this.translatedText,
     this.scrollPosition = 0,
@@ -34,9 +47,40 @@ class Chapter {
     this.tocUrl,
   });
 
+  /// A novel is identified by its source-language title plus the site it is
+  /// hosted on, so the same novel on two sites stays two library entries.
+  static String seriesKeyFor(String sourceDomain, String bookTitle) {
+    final host = sourceDomain.trim().toLowerCase();
+    final title = bookTitle.trim().toLowerCase();
+    return '$host::$title';
+  }
+
+  String get seriesKey => seriesKeyFor(sourceDomain, bookTitle);
+
+  /// Best available English-ish name for the novel.
+  String get displayBookTitle {
+    final english = bookTitleEnglish?.trim();
+    if (english != null && english.isNotEmpty) return english;
+    return bookTitle.trim().isEmpty ? sourceDomain : bookTitle.trim();
+  }
+
+  /// Chapter heading for UI. Prefers the translated heading, then the plain
+  /// "Chapter N" form, and only falls back to the source heading when neither
+  /// is available.
+  String get displayChapterTitle {
+    final english = chapterTitleEnglish?.trim();
+    if (english != null && english.isNotEmpty) return english;
+    final number = chapterNumber?.trim();
+    if (number != null && number.isNotEmpty) return 'Chapter $number';
+    return chapterTitle.trim();
+  }
+
   Chapter copyWith({
     String? bookTitle,
+    String? bookTitleEnglish,
     String? chapterTitle,
+    String? chapterTitleEnglish,
+    String? chapterNumber,
     String? rawText,
     String? translatedText,
     double? scrollPosition,
@@ -49,7 +93,10 @@ class Chapter {
       id: id,
       url: url,
       bookTitle: bookTitle ?? this.bookTitle,
+      bookTitleEnglish: bookTitleEnglish ?? this.bookTitleEnglish,
       chapterTitle: chapterTitle ?? this.chapterTitle,
+      chapterTitleEnglish: chapterTitleEnglish ?? this.chapterTitleEnglish,
+      chapterNumber: chapterNumber ?? this.chapterNumber,
       rawText: rawText ?? this.rawText,
       translatedText: translatedText ?? this.translatedText,
       scrollPosition: scrollPosition ?? this.scrollPosition,
@@ -90,13 +137,16 @@ class ChapterAdapter extends TypeAdapter<Chapter> {
       prevUrl: fields[10] as String?,
       nextUrl: fields[11] as String?,
       tocUrl: fields[12] as String?,
+      bookTitleEnglish: fields[13] as String?,
+      chapterNumber: fields[14] as String?,
+      chapterTitleEnglish: fields[15] as String?,
     );
   }
 
   @override
   void write(BinaryWriter writer, Chapter obj) {
     writer
-      ..writeByte(13)
+      ..writeByte(16)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
@@ -122,6 +172,12 @@ class ChapterAdapter extends TypeAdapter<Chapter> {
       ..writeByte(11)
       ..write(obj.nextUrl)
       ..writeByte(12)
-      ..write(obj.tocUrl);
+      ..write(obj.tocUrl)
+      ..writeByte(13)
+      ..write(obj.bookTitleEnglish)
+      ..writeByte(14)
+      ..write(obj.chapterNumber)
+      ..writeByte(15)
+      ..write(obj.chapterTitleEnglish);
   }
 }

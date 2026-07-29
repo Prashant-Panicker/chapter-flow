@@ -60,12 +60,62 @@ class TranslationService {
   final Dio _dio;
   final CancelToken _cancelToken = CancelToken();
   static Future<void> _translationQueue = Future<void>.value();
+  static final Map<String, String> _titleCache = <String, String>{};
   static const String model = 'kimi-k2.6';
   static const int _chunkChars = 3000;
 
   void cancel() {
     if (!_cancelToken.isCancelled) {
       _cancelToken.cancel('Translation stopped');
+    }
+  }
+
+  /// Translates a novel name or chapter heading into English. Short,
+  /// single-shot request that stays out of the chapter queue so it never
+  /// blocks chapter translation. Returns an empty string on failure.
+  Future<String> translateTitle(String title) async {
+    final source = title.trim();
+    if (source.isEmpty) return '';
+    if (!RegExp(r'[^\x00-\x7F]').hasMatch(source)) return source;
+
+    final cached = _titleCache[source];
+    if (cached != null) return cached;
+
+    try {
+      final response = await _dio.post<Map<String, dynamic>>(
+        '/chat/completions',
+        data: {
+          'model': model,
+          'temperature': 0.3,
+          'thinking': {'type': 'disabled'},
+          'messages': [
+            {
+              'role': 'system',
+              'content':
+                  'You translate Chinese web novel names and chapter headings '
+                  'into English. Keep proper names in Pinyin. Render chapter '
+                  'markers as "Chapter N". Reply with only the English title '
+                  'on a single line — no quotes, no explanation.',
+            },
+            {'role': 'user', 'content': source},
+          ],
+        },
+      );
+      final content =
+          response.data?['choices']?[0]?['message']?['content'] as String?;
+      final english = content
+              ?.split('\n')
+              .firstWhere((l) => l.trim().isNotEmpty, orElse: () => '')
+              .trim()
+              .replaceAll(RegExp(r'^["“”\u0027]+|["“”\u0027]+$'), '')
+              .trim() ??
+          '';
+      if (english.isEmpty || english.length > 120) return '';
+      if (_titleCache.length > 300) _titleCache.clear();
+      _titleCache[source] = english;
+      return english;
+    } catch (_) {
+      return '';
     }
   }
 

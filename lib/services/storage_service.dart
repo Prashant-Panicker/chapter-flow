@@ -29,6 +29,7 @@ class StorageService {
     }
     _chaptersBox = await Hive.openBox<Chapter>(_chaptersBoxName);
     _initialized = true;
+    await pruneAllSeries();
   }
 
   // ---------------- Chapters (key = chapter URL / id) ----------------
@@ -39,26 +40,87 @@ class StorageService {
 
   Chapter? getChapter(String url) => _chaptersBox.get(url);
 
-  List<Chapter> allChapters() {
-    final list = _chaptersBox.values.toList();
+  /// The library shows one entry per novel+site: the most recently read
+  /// chapter of that series.
+  List<Chapter> libraryEntries() {
+    final latest = <String, Chapter>{};
+    for (final c in _chaptersBox.values) {
+      final existing = latest[c.seriesKey];
+      if (existing == null || c.lastReadAt.isAfter(existing.lastReadAt)) {
+        latest[c.seriesKey] = c;
+      }
+    }
+    final list = latest.values.toList();
     list.sort((a, b) => b.lastReadAt.compareTo(a.lastReadAt));
     return list;
   }
 
-  /// Group chapters by bookTitle for a simple library hierarchy.
-  Map<String, List<Chapter>> chaptersByBook() {
-    final map = <String, List<Chapter>>{};
-    for (final c in _chaptersBox.values) {
-      map.putIfAbsent(c.bookTitle, () => []).add(c);
-    }
-    for (final list in map.values) {
-      list.sort((a, b) => a.savedAt.compareTo(b.savedAt));
-    }
-    return map;
+  /// Drops every stored chapter of [seriesKey] except [keepIds], so a series
+  /// never keeps more than the chapter being read plus its prefetched next.
+  Future<void> pruneSeries(
+    String seriesKey, {
+    required Set<String> keepIds,
+  }) async {
+    final stale = _chaptersBox.values
+        .where((c) => c.seriesKey == seriesKey && !keepIds.contains(c.id))
+        .map((c) => c.id)
+        .toList();
+    if (stale.isEmpty) return;
+    await _chaptersBox.deleteAll(stale);
   }
 
-  Future<void> deleteChapter(String url) async {
-    await _chaptersBox.delete(url);
+  /// Applies the one-entry-per-series rule to everything already on disk,
+  /// keeping each series' last read chapter plus its prefetched next one.
+  Future<void> pruneAllSeries() async {
+    final keep = <String>{};
+    for (final entry in libraryEntries()) {
+      keep.add(entry.id);
+      final next = entry.nextUrl;
+      if (next != null && next.isNotEmpty) keep.add(next);
+    }
+    final stale = _chaptersBox.values
+        .where((c) => !keep.contains(c.id))
+        .map((c) => c.id)
+        .toList();
+    if (stale.isEmpty) return;
+    await _chaptersBox.deleteAll(stale);
+  }
+
+  Future<void> deleteSeries(String seriesKey) async {
+    final ids = _chaptersBox.values
+        .where((c) => c.seriesKey == seriesKey)
+        .map((c) => c.id)
+        .toList();
+    if (ids.isEmpty) return;
+    await _chaptersBox.deleteAll(ids);
+  }
+
+  /// Backfills the English novel name once it has been translated.
+  Future<void> setSeriesEnglishTitle(
+    String seriesKey,
+    String englishTitle,
+  ) async {
+    for (final c in _chaptersBox.values.toList()) {
+      if (c.seriesKey != seriesKey || c.bookTitleEnglish == englishTitle) {
+        continue;
+      }
+      await _chaptersBox.put(
+        c.id,
+        c.copyWith(bookTitleEnglish: englishTitle),
+      );
+    }
+  }
+
+  /// Backfills the English chapter heading once it has been translated.
+  Future<void> setChapterEnglishTitle(String id, String englishTitle) async {
+    final existing = _chaptersBox.get(id);
+    if (existing == null || existing.chapterTitleEnglish == englishTitle) {
+      return;
+    }
+    await _chaptersBox.put(
+      id,
+      existing.copyWith(chapterTitleEnglish: englishTitle),
+    );
   }
 
   Future<void> touchLastRead(String url) async {

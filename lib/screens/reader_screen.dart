@@ -20,6 +20,9 @@ class ReaderScreen extends StatefulWidget {
     required this.pageTitle,
     required this.bodyText,
     required this.webViewController,
+    this.bookTitle,
+    this.chapterTitle,
+    this.chapterNumber,
     this.prevUrl,
     this.nextUrl,
     this.tocUrl,
@@ -28,6 +31,9 @@ class ReaderScreen extends StatefulWidget {
   final String url;
   final String pageTitle;
   final String bodyText;
+  final String? bookTitle;
+  final String? chapterTitle;
+  final String? chapterNumber;
   final String? prevUrl;
   final String? nextUrl;
   final String? tocUrl;
@@ -47,9 +53,16 @@ class _ReaderScreenState extends State<ReaderScreen>
   late String _pageTitle;
   late String _rawText;
   String _translatedText = '';
+  String _sourceBookTitle = '';
+  String? _englishBookTitle;
+  String _sourceChapterTitle = '';
+  String? _englishChapterTitle;
+  String? _chapterNumber;
   String? _prevUrl;
   String? _nextUrl;
   String? _tocUrl;
+
+  final ScrollController _scrollController = ScrollController();
 
   ReaderViewMode _viewMode = ReaderViewMode.english;
   bool _continuousEnabled = false;
@@ -84,6 +97,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     _prefetchTranslator?.cancel();
     _prefetchWebView?.dispose();
     _translationUiTimer?.cancel();
+    _scrollController.dispose();
     super.dispose();
   }
 
@@ -94,10 +108,16 @@ class _ReaderScreenState extends State<ReaderScreen>
     _url = widget.url;
     _pageTitle = widget.pageTitle;
     _rawText = widget.bodyText;
+    _sourceBookTitle = _normalizeBookTitle(widget.bookTitle);
+    _sourceChapterTitle = _normalizeChapterTitle(widget.chapterTitle);
+    _chapterNumber = widget.chapterNumber?.trim().isEmpty ?? true
+        ? null
+        : widget.chapterNumber!.trim();
     _prevUrl = widget.prevUrl;
     _nextUrl = widget.nextUrl;
     _tocUrl = widget.tocUrl;
     _loadPrefsAndMaybeTranslate();
+    _resolveEnglishTitles();
   }
 
   @override
@@ -320,12 +340,87 @@ class _ReaderScreenState extends State<ReaderScreen>
     }
   }
 
-  String _guessBookTitle() {
+  /// Uses the novel name the page exposed; falls back to a page-title
+  /// heuristic when the site gives us nothing usable.
+  String _normalizeBookTitle(String? extracted) {
+    final value = extracted?.trim() ?? '';
+    if (value.isNotEmpty) return value;
     final parts = _pageTitle.split(RegExp(r'\s*[-–_|]\s*'));
     if (parts.length >= 2 && parts.first.trim().length > 1) {
       return parts.first.trim();
     }
     return Uri.tryParse(_url)?.host ?? 'Unknown book';
+  }
+
+  String get _displayBookTitle {
+    final english = _englishBookTitle?.trim();
+    if (english != null && english.isNotEmpty) return english;
+    return _sourceBookTitle;
+  }
+
+  /// Uses the page's chapter heading; falls back to the page title so the
+  /// reader always has something to show.
+  String _normalizeChapterTitle(String? extracted) {
+    final value = extracted?.trim() ?? '';
+    if (value.isNotEmpty) return value;
+    return _pageTitle.trim();
+  }
+
+  /// Never shows a source-language heading when an English form exists.
+  String get _displayChapterTitle {
+    final english = _englishChapterTitle?.trim();
+    if (english != null && english.isNotEmpty) return english;
+    final number = _chapterNumber?.trim();
+    if (number != null && number.isNotEmpty) return 'Chapter $number';
+    return _sourceChapterTitle.isEmpty ? 'Chapter' : _sourceChapterTitle;
+  }
+
+  String get _seriesKey =>
+      Chapter.seriesKeyFor(Uri.tryParse(_url)?.host ?? '', _sourceBookTitle);
+
+  /// Translates the novel name and chapter heading so every surface reads in
+  /// English. Both are short, cached requests and failures are non-fatal.
+  Future<void> _resolveEnglishTitles() async {
+    final bookSource = _sourceBookTitle;
+    final chapterSource = _sourceChapterTitle;
+    if (bookSource.isEmpty && chapterSource.isEmpty) return;
+
+    final translator = await _buildTranslator(showMissingKeyMessage: false);
+    if (translator == null) return;
+
+    if (bookSource.isNotEmpty && _englishBookTitle == null) {
+      final english = await translator.translateTitle(bookSource);
+      if (!mounted) return;
+      if (english.isNotEmpty && _sourceBookTitle == bookSource) {
+        setState(() => _englishBookTitle = english);
+        await StorageService.instance.setSeriesEnglishTitle(
+          _seriesKey,
+          english,
+        );
+      }
+    }
+
+    if (!mounted || chapterSource.isEmpty) return;
+    final chapterUrl = _url;
+    final english = await translator.translateTitle(chapterSource);
+    if (!mounted) return;
+    if (english.isNotEmpty && _sourceChapterTitle == chapterSource) {
+      setState(() => _englishChapterTitle = english);
+      await StorageService.instance.setChapterEnglishTitle(
+        chapterUrl,
+        english,
+      );
+    }
+  }
+
+  /// Keeps at most the chapter being read plus the prefetched next one, so
+  /// the library only ever surfaces the last read chapter of this novel.
+  Future<void> _pruneCurrentSeries() async {
+    if (_sourceBookTitle.isEmpty) return;
+    await StorageService.instance.pruneSeries(
+      _seriesKey,
+      keepIds: {_url, if (_nextUrl != null) _nextUrl!},
+    );
   }
 
   Future<void> _saveChapter() async {
@@ -334,8 +429,12 @@ class _ReaderScreenState extends State<ReaderScreen>
     final chapter = Chapter(
       id: _url,
       url: _url,
-      bookTitle: _guessBookTitle(),
-      chapterTitle: _pageTitle.isEmpty ? _url : _pageTitle,
+      bookTitle: _sourceBookTitle,
+      bookTitleEnglish: _englishBookTitle,
+      chapterTitle:
+          _sourceChapterTitle.isEmpty ? _pageTitle : _sourceChapterTitle,
+      chapterTitleEnglish: _englishChapterTitle,
+      chapterNumber: _chapterNumber,
       rawText: _rawText,
       translatedText: _translatedText,
       savedAt: DateTime.now(),
@@ -346,6 +445,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       tocUrl: _tocUrl,
     );
     await StorageService.instance.saveChapter(chapter);
+    await _pruneCurrentSeries();
   }
 
   Future<void> _prefetchNextChapter() async {
@@ -383,22 +483,41 @@ class _ReaderScreenState extends State<ReaderScreen>
 
       final pageTitle = data['pageTitle'] as String? ?? '';
       final uri = Uri.tryParse(nextUrl);
+      final nextBookTitle = (data['bookTitle'] as String? ?? '').trim().isEmpty
+          ? _sourceBookTitle
+          : (data['bookTitle'] as String).trim();
+      final nextChapterNumber = (data['chapterNumber'] as String? ?? '').trim();
+      final nextChapterTitle = (data['chapterTitle'] as String? ?? '').trim();
+      final nextChapterTitleEnglish = nextChapterTitle.isEmpty
+          ? ''
+          : await translator.translateTitle(nextChapterTitle);
       await StorageService.instance.saveChapter(
         Chapter(
           id: nextUrl,
           url: nextUrl,
-          bookTitle: _guessBookTitle(),
-          chapterTitle: pageTitle.isEmpty ? nextUrl : pageTitle,
+          bookTitle: nextBookTitle,
+          bookTitleEnglish:
+              nextBookTitle == _sourceBookTitle ? _englishBookTitle : null,
+          chapterTitle:
+              nextChapterTitle.isEmpty ? pageTitle : nextChapterTitle,
+          chapterTitleEnglish: nextChapterTitleEnglish.isEmpty
+              ? null
+              : nextChapterTitleEnglish,
+          chapterNumber:
+              nextChapterNumber.isEmpty ? null : nextChapterNumber,
           rawText: rawText,
           translatedText: translatedText,
           savedAt: DateTime.now(),
-          lastReadAt: DateTime.now(),
+          // Not read yet — keep it out of the library until the user lands
+          // on it, so the library keeps showing the last read chapter.
+          lastReadAt: DateTime.fromMillisecondsSinceEpoch(0),
           sourceDomain: uri?.host ?? '',
           prevUrl: data['prevUrl'] as String?,
           nextUrl: data['nextUrl'] as String?,
           tocUrl: data['tocUrl'] as String?,
         ),
       );
+      await _pruneCurrentSeries();
     } on TranslationCancelledException {
       // Expected when continuous translation is disabled or the reader closes.
     } catch (e) {
@@ -521,6 +640,10 @@ class _ReaderScreenState extends State<ReaderScreen>
           final resolvedUrl = currentUrl;
           await StorageService.instance.setLastUrl(resolvedUrl);
           if (!mounted) return;
+          final extractedBookTitle = data['bookTitle'] as String?;
+          final extractedChapterTitle = data['chapterTitle'] as String?;
+          final extractedChapterNumber =
+              (data['chapterNumber'] as String? ?? '').trim();
           setState(() {
             _url = resolvedUrl;
             _pageTitle = data['pageTitle'] as String? ?? '';
@@ -529,7 +652,18 @@ class _ReaderScreenState extends State<ReaderScreen>
             _prevUrl = data['prevUrl'] as String?;
             _nextUrl = data['nextUrl'] as String?;
             _tocUrl = data['tocUrl'] as String?;
+            _chapterNumber =
+                extractedChapterNumber.isEmpty ? null : extractedChapterNumber;
+            _sourceChapterTitle = _normalizeChapterTitle(extractedChapterTitle);
+            _englishChapterTitle = null;
+            final nextBookTitle = _normalizeBookTitle(extractedBookTitle);
+            if (nextBookTitle != _sourceBookTitle) {
+              _sourceBookTitle = nextBookTitle;
+              _englishBookTitle = null;
+            }
           });
+          _scrollToTop();
+          unawaited(_resolveEnglishTitles());
           var cached = StorageService.instance.getChapter(resolvedUrl);
           if ((cached == null || cached.translatedText.isEmpty) &&
               (_prefetchUrl == targetUrl || _prefetchUrl == resolvedUrl)) {
@@ -539,10 +673,17 @@ class _ReaderScreenState extends State<ReaderScreen>
           }
           if (!mounted) return;
           if (cached != null && cached.translatedText.isNotEmpty) {
+            await StorageService.instance.touchLastRead(cached.url);
+            if (!mounted) return;
             setState(() {
               _translatedText = cached!.translatedText;
+              _englishChapterTitle ??= cached.chapterTitleEnglish;
+              _englishBookTitle ??= cached.bookTitleEnglish;
               _busy = false;
             });
+            _scrollToTop();
+            await _pruneCurrentSeries();
+            if (!mounted) return;
             if (_continuousEnabled) {
               _prefetchFuture = _prefetchNextChapter();
             }
@@ -600,6 +741,15 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
   }
 
+  /// New chapters always start at the top, including cached ones where the
+  /// scroll view is reused instead of rebuilt.
+  void _scrollToTop() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scrollController.hasClients) return;
+      _scrollController.jumpTo(0);
+    });
+  }
+
   String get _displayText {
     switch (_viewMode) {
       case ReaderViewMode.english:
@@ -632,13 +782,13 @@ class _ReaderScreenState extends State<ReaderScreen>
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              _pageTitle.isEmpty ? 'Chapter' : _pageTitle,
+              _displayChapterTitle,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
             ),
             Text(
-              _guessBookTitle(),
+              _displayBookTitle,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(
@@ -770,6 +920,7 @@ class _ReaderScreenState extends State<ReaderScreen>
                   )
                 : SelectionArea(
                     child: SingleChildScrollView(
+                      controller: _scrollController,
                       padding: const EdgeInsets.fromLTRB(20, 20, 20, 40),
                       child: Center(
                         child: ConstrainedBox(

@@ -47,13 +47,13 @@ class _OfflineReaderScreenState extends State<OfflineReaderScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              widget.chapter.chapterTitle,
+              widget.chapter.displayChapterTitle,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
             ),
             Text(
-              widget.chapter.bookTitle,
+              widget.chapter.displayBookTitle,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(
