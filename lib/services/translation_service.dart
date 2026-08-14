@@ -53,6 +53,13 @@ const String _systemPrompt =
     'organisation. So "青云是朱雀" is "Qingyun is a Vermillion Bird".\n'
     '4. Once a term has an English form, never vary it. Reuse the exact same '
     'wording every time it appears.\n'
+    '5. Before writing each paragraph, silently classify every proper-'
+    'looking term you meet: is it the name of one particular individual — a '
+    'person, or one specific named creature — or is it a category word: a '
+    'sect, clan, pill, technique, artifact, formation, bloodline, title, '
+    'rank, or a species/type of thing? Only the former is Pinyin. When '
+    'unsure, default to English — over-Pinyinizing is the more common '
+    'mistake.\n'
     '\n'
     'Translate paragraph-by-paragraph without summarising. Preserve '
     'paragraph breaks. Do not add commentary, notes or headings. Output only '
@@ -76,6 +83,11 @@ const String _glossarySystemPrompt =
     'type is a short free-form description in your own words, such as '
     '"protagonist", "spirit beast species", "sword sect" or "cultivation '
     'realm".\n'
+    'Before assigning style, silently check: is this the name of one '
+    'particular individual (a person, or one specific named creature), or a '
+    'category — a sect, pill, technique, artifact, formation, bloodline, '
+    'title, rank, or species/type? Only the former is "pinyin". When '
+    'unsure, default to "english".\n'
     'Include only recurring or plot-relevant terms. At most 40 entries.';
 
 class TranslationService {
@@ -135,9 +147,10 @@ class TranslationService {
         '/chat/completions',
         data: {
           'model': model,
-          // 0.6 is the only value this model accepts; anything else is
-          // rejected with a 400. Consistency comes from the glossary, not
-          // from a lower temperature.
+          // Thinking is off here, so temperature must stay 0.6 — pairing
+          // disabled thinking with any other value gets a 400. (1.0 is
+          // required instead when thinking is enabled, as in the chunk
+          // and glossary calls.)
           'temperature': 0.6,
           'thinking': {'type': 'disabled'},
           'messages': [
@@ -235,9 +248,13 @@ class TranslationService {
         cancelToken: _cancelToken,
         data: {
           'model': model,
-          // See _translateChunk: this model only accepts 0.6.
-          'temperature': 0.6,
-          'thinking': {'type': 'disabled'},
+          // kimi-k2.6 ties temperature to thinking mode: 0.6 when disabled,
+          // 1.0 when enabled — mismatching the two gets a 400.
+          'temperature': 1.0,
+          'thinking': {'type': 'enabled'},
+          // Reasoning tokens share this budget with the JSON output, so
+          // keep it generous even though the glossary itself is short.
+          'max_tokens': 16000,
           'messages': [
             {'role': 'system', 'content': _glossarySystemPrompt},
             {'role': 'user', 'content': '$knownBlock$sample'},
@@ -674,11 +691,14 @@ class TranslationService {
       cancelToken: _cancelToken,
       data: {
         'model': model,
-        // This model rejects any other value with a 400 — do not "tune" it.
-        // Naming stability is enforced by the glossary instead.
-        'temperature': 0.6,
+        // kimi-k2.6 ties temperature to thinking mode: 0.6 when disabled,
+        // 1.0 when enabled — mismatching the two gets a 400.
+        'temperature': 1.0,
         'stream': true,
-        'thinking': {'type': 'disabled'},
+        'thinking': {'type': 'enabled'},
+        // Reasoning tokens and the translated chunk share this cap, so it
+        // needs real headroom on top of a ~3000-char source chunk.
+        'max_tokens': 32768,
         'messages': [
           {'role': 'system', 'content': _systemPrompt},
           {'role': 'user', 'content': prompt.toString()},
@@ -711,6 +731,9 @@ class TranslationService {
       try {
         final json = jsonDecode(data) as Map<String, dynamic>;
         final delta = json['choices']?[0]?['delta'];
+        // Thinking is on, so early deltas carry reasoning_content instead
+        // of content — reading only `content` already filters those out,
+        // which is what we want: reasoning text must never reach the page.
         final content = delta?['content'] as String?;
         if (content != null && content.isNotEmpty) {
           buffer.write(content);
