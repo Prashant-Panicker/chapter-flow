@@ -40,30 +40,48 @@ const String _systemPrompt =
     'Xuanhuan, and modern web fiction). Translate the provided text into '
     'natural, high-quality English.\n'
     '\n'
-    'NAMING RULES — follow these exactly, they matter more than style:\n'
-    '1. Personal names of characters, and proper names of places, sects, '
-    'clans and organisations, are written in Pinyin (no tone marks, '
-    'capitalised). Never translate them literally.\n'
-    '2. EVERYTHING else is written in natural English: species and races, '
-    'cultivation realms, techniques, artifacts, pills, formations, '
-    'bloodlines, titles and ranks.\n'
-    '3. A word that names a kind of thing is English even when it looks like '
-    'a name. 朱雀 as a creature is "Vermillion Bird", not "Zhuque". Use Pinyin '
-    'only when the word is the name of one specific individual, place or '
-    'organisation. So "青云是朱雀" is "Qingyun is a Vermillion Bird".\n'
-    '4. Once a term has an English form, never vary it. Reuse the exact same '
-    'wording every time it appears.\n'
-    '5. Before writing each paragraph, silently classify every proper-'
-    'looking term you meet: is it the name of one particular individual — a '
-    'person, or one specific named creature — or is it a category word: a '
-    'sect, clan, pill, technique, artifact, formation, bloodline, title, '
-    'rank, or a species/type of thing? Only the former is Pinyin. When '
-    'unsure, default to English — over-Pinyinizing is the more common '
-    'mistake.\n'
+    'NAMING RULES — these are strict. Follow them exactly; they matter more '
+    'than style:\n'
+    '\n'
+    'PINYIN ONLY for:\n'
+    '• Personal names of human characters (and the rare specific named '
+    'individual creature that functions like a character, e.g. a pet or '
+    'companion with its own given name).\n'
+    'Write them in Pinyin, no tone marks, capitalised. Never translate a '
+    'person\'s name into English words.\n'
+    '\n'
+    'EVERYTHING ELSE → natural English:\n'
+    '• Sects, clans, schools, organisations, factions\n'
+    '• Places, cities, mountains, realms, worlds (unless the place is '
+    'literally a person\'s name)\n'
+    '• Techniques, divine abilities, martial arts, spells, formations\n'
+    '• Artifacts, weapons, treasures, pills, elixirs, medicines\n'
+    '• Species, races, types of beast or spirit (朱雀 → Vermillion Bird, '
+    'not Zhuque; 青龙 → Azure Dragon)\n'
+    '• Cultivation ranks, titles, bloodlines, realms of power\n'
+    '\n'
+    'Quick test before you write any term:\n'
+    'Is this the personal name of one specific person (or one specific '
+    'named animal companion)? → Pinyin.\n'
+    'Is it a category, group, power, item, place, or type of creature? → '
+    'English.\n'
+    'When unsure, choose English. Over-using Pinyin is the most common '
+    'mistake and makes the text hard to follow.\n'
+    '\n'
+    'Examples:\n'
+    '• 青云 is a person → Qingyun\n'
+    '• 青云宗 (a sect) → Azure Cloud Sect\n'
+    '• 朱雀 as a species → Vermillion Bird\n'
+    '• 小白 as a named pet → Xiaobai\n'
+    '• 破军剑诀 / 大日如来神掌 → English technique / divine-ability names\n'
+    '• 聚元丹 → Essence Gathering Pill (or similar natural English)\n'
+    '\n'
+    'Once a term has an English form, reuse that exact wording every time. '
+    'Do not invent variants.\n'
     '\n'
     'Translate paragraph-by-paragraph without summarising. Preserve '
-    'paragraph breaks. Do not add commentary, notes or headings. Output only '
-    'the translated text.';
+    'paragraph breaks. Do not add commentary, notes or headings. Output '
+    'only the translated text.';
 
 const String _glossarySystemPrompt =
     'You build a translation glossary from Chinese web-novel text.\n'
@@ -72,22 +90,26 @@ const String _glossarySystemPrompt =
     '{"source":"<exact substring from the text>","english":"<rendering>",'
     '"style":"pinyin"|"english","type":"<short description>"}\n'
     '\n'
-    'style is "pinyin" ONLY for personal names of characters and proper '
-    'names of places, sects, clans and organisations; english must then be '
-    'the Pinyin, no tone marks, capitalised.\n'
-    'style is "english" for everything else: species, races, cultivation '
-    'realms, techniques, artifacts, pills, formations, bloodlines, titles '
-    'and ranks. A word naming a kind of thing is "english" even when it '
-    'looks like a name (朱雀 -> Vermillion Bird, style "english"). Use '
-    '"pinyin" only for one specific individual, place or organisation.\n'
-    'type is a short free-form description in your own words, such as '
-    '"protagonist", "spirit beast species", "sword sect" or "cultivation '
-    'realm".\n'
-    'Before assigning style, silently check: is this the name of one '
-    'particular individual (a person, or one specific named creature), or a '
-    'category — a sect, pill, technique, artifact, formation, bloodline, '
-    'title, rank, or species/type? Only the former is "pinyin". When '
-    'unsure, default to "english".\n'
+    'style = "pinyin" ONLY for personal names of human characters and the '
+    'rare specific named individual creature that acts like a character '
+    '(a pet or companion with its own given name). english is then the '
+    'Pinyin, no tone marks, capitalised.\n'
+    '\n'
+    'style = "english" for EVERYTHING else:\n'
+    'sects, clans, organisations, places, techniques, divine abilities, '
+    'martial arts, artifacts, pills, elixirs, formations, species, races, '
+    'spirit beasts as a type, cultivation ranks, titles, bloodlines, '
+    'realms. A word that names a kind of thing is always "english" even '
+    'when it looks like a name (朱雀 → Vermillion Bird, style "english").\n'
+    '\n'
+    'Before assigning style, ask: is this the personal name of one '
+    'specific person or one specific named animal companion? Only then '
+    'use "pinyin". Otherwise use "english". When unsure, default to '
+    '"english". Over-Pinyinizing is the more common and more confusing '
+    'mistake.\n'
+    '\n'
+    'type is a short free-form description, e.g. "protagonist", "sect", '
+    '"pill", "divine ability", "spirit beast species", "cultivation rank".\n'
     'Include only recurring or plot-relevant terms. At most 40 entries.';
 
 class TranslationService {
@@ -158,14 +180,13 @@ class TranslationService {
               'role': 'system',
               'content':
                   'You translate Chinese web novel names and chapter headings '
-                  'into English. Personal names of characters and proper '
-                  'names of places, sects and organisations stay in Pinyin. '
-                  'Everything else becomes natural English — species, realms, '
-                  'techniques, artifacts, titles. A word naming a kind of '
-                  'thing is English even when it looks like a name '
-                  '(朱雀 -> Vermillion Bird). Render chapter markers as '
-                  '"Chapter N". Reply with only the English title on a single '
-                  'line — no quotes, no explanation.',
+                  'into English. Personal names of characters stay in Pinyin. '
+                  'Everything else becomes natural English — sects, places, '
+                  'species, realms, techniques, divine abilities, artifacts, '
+                  'titles. A word naming a kind of thing is English even when '
+                  'it looks like a name (朱雀 -> Vermillion Bird). Render '
+                  'chapter markers as "Chapter N". Reply with only the English '
+                  'title on a single line — no quotes, no explanation.',
             },
             {'role': 'user', 'content': source},
           ],
@@ -691,14 +712,11 @@ class TranslationService {
       cancelToken: _cancelToken,
       data: {
         'model': model,
-        // kimi-k2.6 ties temperature to thinking mode: 0.6 when disabled,
-        // 1.0 when enabled — mismatching the two gets a 400.
-        'temperature': 1.0,
+        // Thinking stays disabled for the live stream so tokens appear
+        // immediately. Temperature must be 0.6 when thinking is off.
+        'temperature': 0.6,
         'stream': true,
-        'thinking': {'type': 'enabled'},
-        // Reasoning tokens and the translated chunk share this cap, so it
-        // needs real headroom on top of a ~3000-char source chunk.
-        'max_tokens': 32768,
+        'thinking': {'type': 'disabled'},
         'messages': [
           {'role': 'system', 'content': _systemPrompt},
           {'role': 'user', 'content': prompt.toString()},
@@ -731,9 +749,6 @@ class TranslationService {
       try {
         final json = jsonDecode(data) as Map<String, dynamic>;
         final delta = json['choices']?[0]?['delta'];
-        // Thinking is on, so early deltas carry reasoning_content instead
-        // of content — reading only `content` already filters those out,
-        // which is what we want: reasoning text must never reach the page.
         final content = delta?['content'] as String?;
         if (content != null && content.isNotEmpty) {
           buffer.write(content);
