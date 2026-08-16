@@ -1,0 +1,27 @@
+name: Restore core files
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore from parent commit
+        run: |
+          set -euo pipefail
+          PARENT=e1e10c348be4add6ab816f4a329860aff36ca020
+          curl -fsSL "https://raw.githubusercontent.com/Prashant-Panicker/chapter-flow/${PARENT}/lib/services/translation_service.dart" -o lib/services/translation_service.dart
+          curl -fsSL "https://raw.githubusercontent.com/Prashant-Panicker/chapter-flow/${PARENT}/lib/screens/reader_screen.dart" -o lib/screens/reader_screen.dart
+          wc -c lib/services/translation_service.dart lib/screens/reader_screen.dart
+      - name: Commit restore
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add lib/services/translation_service.dart lib/screens/reader_screen.dart
+          git commit -m "fix: restore translation_service and reader_screen from parent" || echo no changes
+          git push
