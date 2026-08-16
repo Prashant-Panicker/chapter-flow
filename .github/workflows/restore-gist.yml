@@ -1,0 +1,268 @@
+name: Restore gist mode core files
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore and patch translation + reader
+        run: |
+          set -euo pipefail
+          PARENT=e1e10c348be4add6ab816f4a329860aff36ca020
+          curl -fsSL "https://raw.githubusercontent.com/Prashant-Panicker/chapter-flow/${PARENT}/lib/services/translation_service.dart" \
+            -o lib/services/translation_service.dart
+          curl -fsSL "https://raw.githubusercontent.com/Prashant-Panicker/chapter-flow/${PARENT}/lib/screens/reader_screen.dart" \
+            -o lib/screens/reader_screen.dart
+          python3 << 'PY'
+          from pathlib import Path
+
+          path = Path("lib/services/translation_service.dart")
+          text = path.read_text()
+
+          enum_block = (
+              "\n"
+              "/// How chapter text is rendered by the translator.\n"
+              "enum TranslationMode {\n"
+              "  /// Full paragraph-by-paragraph literary translation.\n"
+              "  full,\n"
+              "\n"
+              "  /// Condensed narrative: events, dialogue, and context kept; filler cut.\n"
+              "  gist,\n"
+              "}\n"
+              "\n"
+          )
+
+          if "enum TranslationMode" not in text:
+              text = text.replace(
+                  "const String _systemPrompt =",
+                  enum_block + "const String _systemPrompt =",
+                  1,
+              )
+
+          gist_prompt = (
+              "const String _gistSystemPrompt =\n"
+              "    'You are an expert translator of Chinese web novels (Wuxia, Xianxia, '\n"
+              "    'Xuanhuan, and modern web fiction). Produce a CONDENSED English version '\n"
+              "    'of the provided text — a readable narrative gist, not a tiny summary '\n"
+              "    'and not a full literary translation.\\n'\n"
+              "    '\\n'\n"
+              "    'GOAL: Keep the story fully followable while cutting filler. Target '\n"
+              "    'roughly half the length of a full translation.\\n'\n"
+              "    '\\n'\n"
+              "    'MUST PRESERVE:\\n'\n"
+              "    '• Chronological event order and cause → effect\\n'\n"
+              "    '• All meaningful dialogue (you may tighten wording slightly, but do '\n"
+              "    'not drop lines that advance plot, character, or relationships)\\n'\n"
+              "    '• Character decisions, goals, revelations, and outcomes\\n'\n"
+              "    '• World or power details that matter for later chapters\\n'\n"
+              "    '• Paragraph breaks where scenes or speakers change\\n'\n"
+              "    '\\n'\n"
+              "    'MAY REMOVE OR TIGHTEN:\\n'\n"
+              "    '• Pure atmosphere and scenic description with no plot weight\\n'\n"
+              "    '• Repeated internal monologue that restates a known fact\\n'\n"
+              "    '• Filler travel, waiting, or \"time passed\" padding\\n'\n"
+              "    '• Redundant restatements of the same information\\n'\n"
+              "    '\\n'\n"
+              "    'Do not invent events, reorder scenes, or omit plot-relevant actions. '\n"
+              "    'Do not add commentary, notes, headings, or a \"Summary:\" label. Output '\n"
+              "    'only the condensed English narrative.\\n'\n"
+              "    '\\n'\n"
+              "    'NAMING RULES — these are strict. Follow them exactly; they matter more '\n"
+              "    'than style:\\n'\n"
+              "    '\\n'\n"
+              "    'PINYIN ONLY for:\\n'\n"
+              "    '• Personal names of human characters (and the rare specific named '\n"
+              "    'individual creature that functions like a character, e.g. a pet or '\n"
+              "    'companion with its own given name).\\n'\n"
+              "    'Write them in Pinyin, no tone marks, capitalised. Never translate a '\n"
+              "    'person\\'s name into English words.\\n'\n"
+              "    '\\n'\n"
+              "    'EVERYTHING ELSE → natural English:\\n'\n"
+              "    '• Sects, clans, schools, organisations, factions\\n'\n"
+              "    '• Places, cities, mountains, realms, worlds (unless the place is '\n"
+              "    'literally a person\\'s name)\\n'\n"
+              "    '• Techniques, divine abilities, martial arts, spells, formations\\n'\n"
+              "    '• Artifacts, weapons, treasures, pills, elixirs, medicines\\n'\n"
+              "    '• Species, races, types of beast or spirit (朱雀 → Vermillion Bird, '\n"
+              "    'not Zhuque; 青龙 → Azure Dragon)\\n'\n"
+              "    '• Cultivation ranks, titles, bloodlines, realms of power\\n'\n"
+              "    '\\n'\n"
+              "    'Quick test before you write any term:\\n'\n"
+              "    'Is this the personal name of one specific person (or one specific '\n"
+              "    'named animal companion)? → Pinyin.\\n'\n"
+              "    'Is it a category, group, power, item, place, or type of creature? → '\n"
+              "    'English.\\n'\n"
+              "    'When unsure, choose English. Over-using Pinyin is the most common '\n"
+              "    'mistake and makes the text hard to follow.\\n'\n"
+              "    '\\n'\n"
+              "    'Examples:\\n'\n"
+              "    '• 青云 is a person → Qingyun\\n'\n"
+              "    '• 青云宗 (a sect) → Azure Cloud Sect\\n'\n"
+              "    '• 朱雀 as a species → Vermillion Bird\\n'\n"
+              "    '• 小白 as a named pet → Xiaobai\\n'\n"
+              "    '• 破军剑诀 / 大日如来神掌 → English technique / divine-ability names\\n'\n"
+              "    '• 聚元丹 → Essence Gathering Pill (or similar natural English)\\n'\n"
+              "    '\\n'\n"
+              "    'Once a term has an English form, reuse that exact wording every time. '\n"
+              "    'Do not invent variants.';\n"
+              "\n"
+          )
+
+          marker = "    'only the translated text.';\n\nconst String _glossarySystemPrompt ="
+          if "_gistSystemPrompt" not in text:
+              if marker not in text:
+                  raise SystemExit("glossary marker missing")
+              text = text.replace(
+                  marker,
+                  "    'only the translated text.';\n\n" + gist_prompt + "const String _glossarySystemPrompt =",
+                  1,
+              )
+
+          old_ctor = """  TranslationService({required String apiKey})
+      : _dio = Dio(BaseOptions(
+          baseUrl: 'https://api.moonshot.ai/v1',
+          headers: {
+            'Authorization': 'Bearer $apiKey',
+            'Content-Type': 'application/json',
+          },
+          connectTimeout: const Duration(seconds: 30),
+          // Streaming keeps the connection alive with continuous data,
+          // so a longer receiveTimeout is safe as a backstop.
+          receiveTimeout: const Duration(minutes: 10),
+        ));
+
+  final Dio _dio;
+  final CancelToken _cancelToken = CancelToken();
+  static Future<void> _translationQueue = Future<void>.value();
+  static final Map<String, String> _titleCache = <String, String>{};
+  static const String model = 'kimi-k2.6';
+"""
+
+          new_ctor = """  TranslationService({
+    required String apiKey,
+    this.mode = TranslationMode.full,
+  }) : _dio = Dio(BaseOptions(
+          baseUrl: 'https://api.moonshot.ai/v1',
+          headers: {
+            'Authorization': 'Bearer $apiKey',
+            'Content-Type': 'application/json',
+          },
+          connectTimeout: const Duration(seconds: 30),
+          // Streaming keeps the connection alive with continuous data,
+          // so a longer receiveTimeout is safe as a backstop.
+          receiveTimeout: const Duration(minutes: 10),
+        ));
+
+  final TranslationMode mode;
+  final Dio _dio;
+  final CancelToken _cancelToken = CancelToken();
+  static Future<void> _translationQueue = Future<void>.value();
+  static final Map<String, String> _titleCache = <String, String>{};
+  static const String model = 'kimi-k2.6';
+"""
+
+          if "this.mode = TranslationMode.full" not in text:
+              if old_ctor not in text:
+                  raise SystemExit("old ctor not found")
+              text = text.replace(old_ctor, new_ctor, 1)
+
+          old_user = """    prompt
+      ..writeln(
+        'Translate the following novel text into English. Keep paragraph '
+        'breaks.',
+      )
+      ..writeln()
+      ..write(chunk);
+
+    final response = await _dio.post<ResponseBody>(
+      '/chat/completions',
+      cancelToken: _cancelToken,
+      data: {
+        'model': model,
+        // Thinking stays disabled for the live stream so tokens appear
+        // immediately. Temperature must be 0.6 when thinking is off.
+        'temperature': 0.6,
+        'stream': true,
+        'thinking': {'type': 'disabled'},
+        'messages': [
+          {'role': 'system', 'content': _systemPrompt},
+          {'role': 'user', 'content': prompt.toString()},
+        ],
+      },"""
+
+          new_user = """    final isGist = mode == TranslationMode.gist;
+    prompt
+      ..writeln(
+        isGist
+            ? 'Produce a condensed English version of the following novel '
+                'text. Keep event order, meaningful dialogue, and context; '
+                'cut pure filler. Keep paragraph breaks where scenes or '
+                'speakers change.'
+            : 'Translate the following novel text into English. Keep paragraph '
+                'breaks.',
+      )
+      ..writeln()
+      ..write(chunk);
+
+    final response = await _dio.post<ResponseBody>(
+      '/chat/completions',
+      cancelToken: _cancelToken,
+      data: {
+        'model': model,
+        // Thinking stays disabled for the live stream so tokens appear
+        // immediately. Temperature must be 0.6 when thinking is off.
+        'temperature': 0.6,
+        'stream': true,
+        'thinking': {'type': 'disabled'},
+        'messages': [
+          {
+            'role': 'system',
+            'content': isGist ? _gistSystemPrompt : _systemPrompt,
+          },
+          {'role': 'user', 'content': prompt.toString()},
+        ],
+      },"""
+
+          if "isGist ? _gistSystemPrompt" not in text:
+              if old_user not in text:
+                  raise SystemExit("old user prompt block not found")
+              text = text.replace(old_user, new_user, 1)
+
+          path.write_text(text)
+          print("translation_service.dart patched", path.stat().st_size)
+
+          rpath = Path("lib/screens/reader_screen.dart")
+          rtext = rpath.read_text()
+          old = "    return TranslationService(apiKey: key);\n  }\n"
+          new = (
+              "    final gist = await StorageService.instance.getGistMode();\n"
+              "    return TranslationService(\n"
+              "      apiKey: key,\n"
+              "      mode: gist ? TranslationMode.gist : TranslationMode.full,\n"
+              "    );\n"
+              "  }\n"
+          )
+          if "TranslationMode.gist" not in rtext:
+              if old not in rtext:
+                  raise SystemExit("reader buildTranslator return not found")
+              rtext = rtext.replace(old, new, 1)
+          rpath.write_text(rtext)
+          print("reader_screen.dart patched", rpath.stat().st_size)
+          PY
+
+      - name: Commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add lib/services/translation_service.dart lib/screens/reader_screen.dart
+          git status
+          git diff --cached --stat
+          git commit -m "feat: Condensed (gist) translation mode for chapter output" || echo "no changes"
+          git push
