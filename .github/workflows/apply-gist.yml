@@ -1,0 +1,23 @@
+name: Apply gist mode
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply gist mode patches
+        run: python3 tools/apply_gist_mode.py
+      - name: Commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add lib/services/translation_service.dart lib/screens/reader_screen.dart
+          git status
+          git commit -m "feat: Condensed (gist) translation mode for chapter output" || echo no changes
+          git push
