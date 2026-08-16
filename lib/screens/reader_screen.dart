@@ -44,7 +44,7 @@ class ReaderScreen extends StatefulWidget {
 }
 
 class _ReaderScreenState extends State<ReaderScreen>
-  with WidgetsBindingObserver {
+    with WidgetsBindingObserver {
   static const _mobileChromeUA =
       'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 '
       '(KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36';
@@ -73,6 +73,8 @@ class _ReaderScreenState extends State<ReaderScreen>
   bool _prefetchCancelRequested = false;
   bool _appInBackground = false;
   bool _resumeTranslation = false;
+  /// True while the active reader is displaying an in-flight prefetch stream.
+  bool _prefetchHandoff = false;
   String? _prefetchUrl;
   Future<void>? _prefetchFuture;
   TranslationService? _activeTranslator;
@@ -87,6 +89,17 @@ class _ReaderScreenState extends State<ReaderScreen>
   int _chunkCurrent = 0;
   int _chunkTotal = 0;
   double _fontSize = StorageService.defaultFontSize;
+
+  /// Fully finished chunk English for the chapter currently being translated.
+  /// Used to resume without re-sending completed chunks.
+  List<String> _completedParts = [];
+
+  /// Live prefetch progress (shared so handoff can paint immediately).
+  String _prefetchPartialText = '';
+  int _prefetchChunkCurrent = 0;
+  int _prefetchChunkTotal = 0;
+  List<String> _prefetchCompletedParts = [];
+  String _prefetchRawText = '';
 
   @override
   void dispose() {
@@ -134,13 +147,17 @@ class _ReaderScreenState extends State<ReaderScreen>
 
     if (state == AppLifecycleState.detached) {
       _appInBackground = true;
-      if (_translating) {
+      if (_translating && !_prefetchHandoff) {
         _resumeTranslation = true;
         _cancelRequested = true;
         _activeTranslator?.cancel();
       }
-      _prefetchCancelRequested = true;
-      _prefetchTranslator?.cancel();
+      // Prefetch (and handoff) also stop; checkpoint is already on disk.
+      if (_prefetching) {
+        if (_prefetchHandoff) _resumeTranslation = true;
+        _prefetchCancelRequested = true;
+        _prefetchTranslator?.cancel();
+      }
       final extraction = _prefetchExtractionCompleter;
       if (extraction != null && !extraction.isCompleted) {
         extraction.completeError(TranslationCancelledException());
@@ -153,7 +170,8 @@ class _ReaderScreenState extends State<ReaderScreen>
     if (!mounted || _appInBackground) return;
     if (_resumeTranslation && !_translating) {
       _resumeTranslation = false;
-      _startTranslation(force: true);
+      // Keep checkpoint so only remaining chunks are sent.
+      _startTranslation(force: true, keepCheckpoint: true);
       return;
     }
     if (_continuousEnabled &&
@@ -174,13 +192,25 @@ class _ReaderScreenState extends State<ReaderScreen>
       _fontSize = fontSize;
       if (cached != null && cached.translatedText.isNotEmpty) {
         _translatedText = cached.translatedText;
+        if (cached.completedSourceChunks > 0) {
+          _completedParts = cached.translatedText
+              .split('\n\n')
+              .where((p) => p.trim().isNotEmpty)
+              .toList();
+          // Prefer the stored count when it matches split length.
+          if (_completedParts.length > cached.completedSourceChunks) {
+            _completedParts =
+                _completedParts.take(cached.completedSourceChunks).toList();
+          }
+        }
       }
     });
-    if (cached != null && cached.translatedText.isNotEmpty) {
+    if (cached != null && cached.isFullyTranslated) {
       _restoreProgress(cached.scrollPosition);
     }
-    if (_continuousEnabled && _translatedText.isEmpty) {
-      await _startTranslation();
+    if (_continuousEnabled &&
+        (cached == null || !cached.isFullyTranslated)) {
+      await _startTranslation(keepCheckpoint: true);
     } else if (_continuousEnabled) {
       _prefetchFuture = _prefetchNextChapter();
     }
@@ -205,9 +235,16 @@ class _ReaderScreenState extends State<ReaderScreen>
     return TranslationService(apiKey: key);
   }
 
-  Future<void> _startTranslation({bool force = false}) async {
+  Future<void> _startTranslation({
+    bool force = false,
+    bool keepCheckpoint = false,
+  }) async {
     if (_translating) return;
-    if (!force && _translatedText.isNotEmpty) return;
+    if (!force && _translatedText.isNotEmpty && _completedParts.isEmpty) {
+      // Fully translated already.
+      final cached = StorageService.instance.getChapter(_url);
+      if (cached != null && cached.isFullyTranslated) return;
+    }
     if (_appInBackground) {
       _resumeTranslation = true;
       return;
@@ -223,24 +260,48 @@ class _ReaderScreenState extends State<ReaderScreen>
     _translationUiTimer?.cancel();
     _pendingTranslatedText = null;
 
+    if (force && !keepCheckpoint) {
+      _completedParts = [];
+    }
+
+    final startFrom = _completedParts.length;
+    final priorJoined =
+        _completedParts.isEmpty ? '' : _completedParts.join('\n\n');
+
     setState(() {
       _translating = true;
       _cancelRequested = false;
-      _chunkCurrent = 0;
+      _chunkCurrent = startFrom;
       _chunkTotal = 0;
-      if (force) _translatedText = '';
+      if (force && !keepCheckpoint) {
+        _translatedText = '';
+      } else if (priorJoined.isNotEmpty) {
+        _translatedText = priorJoined;
+      }
     });
 
     var retryRequested = false;
     try {
-      // Runs alongside the first chunk instead of before it, so pinning terms
-      // costs no perceived delay. Chunk 1 uses whatever the series already
-      // knows; later chunks pick up anything new this chapter introduced.
+      // Runs alongside the first remaining chunk so pinning costs no delay.
       unawaited(_buildGlossary(translator, _rawText, _seriesKey));
       final result = await translator.translateChapter(
         rawText: _rawText,
         glossary: () => StorageService.instance.glossaryFor(_seriesKey),
         shouldCancel: () => _cancelRequested,
+        startFromChunk: startFrom,
+        priorParts: List<String>.from(_completedParts),
+        onChunkComplete: (completed, total, partial) {
+          _completedParts = partial
+              .split('\n\n')
+              .where((p) => p.trim().isNotEmpty)
+              .toList();
+          // Keep list length aligned with completed count.
+          if (_completedParts.length > completed) {
+            _completedParts = _completedParts.take(completed).toList();
+          }
+          _translatedText = partial;
+          unawaited(_saveChapter(checkpointChunks: completed));
+        },
         onProgress: (current, total, partial) {
           _queueTranslationProgress(current, total, partial);
         },
@@ -248,8 +309,9 @@ class _ReaderScreenState extends State<ReaderScreen>
       if (!mounted) return;
       _translationUiTimer?.cancel();
       _pendingTranslatedText = null;
+      _completedParts = [];
       setState(() => _translatedText = result);
-      await _saveChapter();
+      await _saveChapter(checkpointChunks: 0);
       if (_continuousEnabled) {
         _prefetchFuture = _prefetchNextChapter();
       }
@@ -291,7 +353,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       }
     }
     if (retryRequested && mounted) {
-      await _startTranslation(force: true);
+      await _startTranslation(force: true, keepCheckpoint: true);
     }
   }
 
@@ -322,6 +384,10 @@ class _ReaderScreenState extends State<ReaderScreen>
   void _cancelTranslation() {
     setState(() => _cancelRequested = true);
     _activeTranslator?.cancel();
+    if (_prefetchHandoff) {
+      _prefetchCancelRequested = true;
+      _prefetchTranslator?.cancel();
+    }
   }
 
   Future<void> _setContinuousEnabled(bool enabled) async {
@@ -465,7 +531,8 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
   }
 
-  Future<void> _saveChapter() async {
+  /// [checkpointChunks] > 0 marks an in-progress save; 0 means fully done.
+  Future<void> _saveChapter({int checkpointChunks = 0}) async {
     if (_translatedText.isEmpty) return;
     final uri = Uri.tryParse(_url);
     final chapter = Chapter(
@@ -485,6 +552,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       prevUrl: _prevUrl,
       nextUrl: _nextUrl,
       tocUrl: _tocUrl,
+      completedSourceChunks: checkpointChunks,
     );
     await StorageService.instance.saveChapter(chapter);
     await _pruneCurrentSeries();
@@ -494,7 +562,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     final nextUrl = _nextUrl;
     if (_prefetching || nextUrl == null || nextUrl == _url) return;
     final cached = StorageService.instance.getChapter(nextUrl);
-    if (cached != null && cached.translatedText.isNotEmpty) return;
+    if (cached != null && cached.isFullyTranslated) return;
 
     final translator = await _buildTranslator(showMissingKeyMessage: false);
     if (translator == null ||
@@ -508,7 +576,13 @@ class _ReaderScreenState extends State<ReaderScreen>
     setState(() {
       _prefetching = true;
       _prefetchCancelRequested = false;
+      _prefetchHandoff = false;
       _prefetchUrl = nextUrl;
+      _prefetchPartialText = '';
+      _prefetchChunkCurrent = 0;
+      _prefetchChunkTotal = 0;
+      _prefetchCompletedParts = [];
+      _prefetchRawText = '';
     });
 
     try {
@@ -516,20 +590,91 @@ class _ReaderScreenState extends State<ReaderScreen>
       if (_prefetchCancelRequested || !_continuousEnabled) return;
 
       final rawText = (data['bodyText'] as String? ?? '').trim();
+      _prefetchRawText = rawText;
       final seriesKey = _seriesKey;
-      // The next chapter's terms are pinned while it is still being
-      // prefetched, so by the time the reader gets there the wording is
-      // already settled.
+      // Resume from any partial checkpoint already on disk for this URL.
+      final existing = StorageService.instance.getChapter(nextUrl);
+      var startFrom = 0;
+      var priorParts = <String>[];
+      if (existing != null &&
+          existing.completedSourceChunks > 0 &&
+          existing.translatedText.isNotEmpty) {
+        startFrom = existing.completedSourceChunks;
+        priorParts = existing.translatedText
+            .split('\n\n')
+            .where((p) => p.trim().isNotEmpty)
+            .take(startFrom)
+            .toList();
+        _prefetchPartialText = priorParts.join('\n\n');
+        _prefetchCompletedParts = List.from(priorParts);
+      }
+
       unawaited(
         _buildGlossary(translator, rawText, seriesKey, prefetch: true),
       );
       final translatedText = await translator.translateChapter(
         rawText: rawText,
         glossary: () => StorageService.instance.glossaryFor(seriesKey),
-        shouldCancel: () => _prefetchCancelRequested || !_continuousEnabled,
-        onProgress: (_, __, ___) {},
+        shouldCancel: () =>
+            _prefetchCancelRequested ||
+            (!_continuousEnabled && !_prefetchHandoff),
+        startFromChunk: startFrom,
+        priorParts: priorParts,
+        onChunkComplete: (completed, total, partial) {
+          _prefetchCompletedParts = partial
+              .split('\n\n')
+              .where((p) => p.trim().isNotEmpty)
+              .take(completed)
+              .toList();
+          _prefetchPartialText = partial;
+          // Persist checkpoint under the next chapter URL.
+          unawaited(() async {
+            final uri = Uri.tryParse(nextUrl);
+            final pageTitle = data['pageTitle'] as String? ?? '';
+            final nextBookTitle =
+                (data['bookTitle'] as String? ?? '').trim().isEmpty
+                    ? _sourceBookTitle
+                    : (data['bookTitle'] as String).trim();
+            final nextChapterNumber =
+                (data['chapterNumber'] as String? ?? '').trim();
+            final nextChapterTitle =
+                (data['chapterTitle'] as String? ?? '').trim();
+            await StorageService.instance.saveChapter(
+              Chapter(
+                id: nextUrl,
+                url: nextUrl,
+                bookTitle: nextBookTitle,
+                bookTitleEnglish: nextBookTitle == _sourceBookTitle
+                    ? _englishBookTitle
+                    : null,
+                chapterTitle:
+                    nextChapterTitle.isEmpty ? pageTitle : nextChapterTitle,
+                chapterNumber:
+                    nextChapterNumber.isEmpty ? null : nextChapterNumber,
+                rawText: rawText,
+                translatedText: partial,
+                savedAt: DateTime.now(),
+                lastReadAt: DateTime.fromMillisecondsSinceEpoch(0),
+                sourceDomain: uri?.host ?? '',
+                prevUrl: data['prevUrl'] as String?,
+                nextUrl: data['nextUrl'] as String?,
+                tocUrl: data['tocUrl'] as String?,
+                completedSourceChunks: completed,
+              ),
+            );
+          }());
+        },
+        onProgress: (current, total, partial) {
+          _prefetchChunkCurrent = current;
+          _prefetchChunkTotal = total;
+          _prefetchPartialText = partial;
+          // If the user already navigated here, stream into the reader UI.
+          if (_prefetchHandoff && _url == nextUrl && mounted) {
+            _queueTranslationProgress(current, total, partial);
+          }
+        },
       );
-      if (_prefetchCancelRequested || !_continuousEnabled) return;
+      if (_prefetchCancelRequested && !_prefetchHandoff) return;
 
       final pageTitle = data['pageTitle'] as String? ?? '';
       final uri = Uri.tryParse(nextUrl);
@@ -560,19 +705,40 @@ class _ReaderScreenState extends State<ReaderScreen>
           savedAt: DateTime.now(),
           // Not read yet — keep it out of the library until the user lands
           // on it, so the library keeps showing the last read chapter.
-          lastReadAt: DateTime.fromMillisecondsSinceEpoch(0),
+          lastReadAt: _prefetchHandoff
+              ? DateTime.now()
+              : DateTime.fromMillisecondsSinceEpoch(0),
           sourceDomain: uri?.host ?? '',
           prevUrl: data['prevUrl'] as String?,
           nextUrl: data['nextUrl'] as String?,
           tocUrl: data['tocUrl'] as String?,
+          completedSourceChunks: 0,
         ),
       );
       await _pruneCurrentSeries();
+
+      if (_prefetchHandoff && mounted && _url == nextUrl) {
+        _completedParts = [];
+        setState(() {
+          _translatedText = translatedText;
+          _translating = false;
+          _prefetchHandoff = false;
+        });
+        if (_continuousEnabled) {
+          _prefetchFuture = _prefetchNextChapter();
+        }
+      }
     } on TranslationCancelledException {
       // Expected when continuous translation is disabled or the reader closes.
     } catch (e) {
       if (mounted && !_prefetchCancelRequested) {
         _showSnack('Next chapter not ready.');
+      }
+      if (_prefetchHandoff && mounted) {
+        setState(() {
+          _translating = false;
+          _prefetchHandoff = false;
+        });
       }
     } finally {
       await _prefetchWebView?.dispose();
@@ -584,7 +750,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       if (mounted) {
         setState(() {
           _prefetching = false;
-          _prefetchUrl = null;
+          if (!_prefetchHandoff) _prefetchUrl = null;
         });
       }
     }
@@ -643,8 +809,12 @@ class _ReaderScreenState extends State<ReaderScreen>
   Future<void> _navigate(String targetUrl) async {
     // Captures where you were before _url moves on to the new chapter.
     _persistProgress();
-    if (_translating) _cancelTranslation();
-    if (_prefetching && _prefetchUrl != targetUrl) {
+    if (_translating && !_prefetchHandoff) _cancelTranslation();
+
+    final isPrefetchTarget =
+        _prefetching && _prefetchUrl != null && _prefetchUrl == targetUrl;
+
+    if (_prefetching && !isPrefetchTarget) {
       _prefetchCancelRequested = true;
       _prefetchTranslator?.cancel();
       final extraction = _prefetchExtractionCompleter;
@@ -653,6 +823,12 @@ class _ReaderScreenState extends State<ReaderScreen>
       }
       await _prefetchWebView?.dispose();
     }
+
+    if (isPrefetchTarget) {
+      // Keep the in-flight job; UI will attach to its stream.
+      _prefetchHandoff = true;
+    }
+
     setState(() => _busy = true);
     try {
       final previousUrl =
@@ -696,11 +872,14 @@ class _ReaderScreenState extends State<ReaderScreen>
           final extractedChapterTitle = data['chapterTitle'] as String?;
           final extractedChapterNumber =
               (data['chapterNumber'] as String? ?? '').trim();
+
+          final handingOff = _prefetchHandoff &&
+              (_prefetchUrl == targetUrl || _prefetchUrl == resolvedUrl);
+
           setState(() {
             _url = resolvedUrl;
             _pageTitle = data['pageTitle'] as String? ?? '';
             _rawText = bodyText;
-            _translatedText = '';
             _prevUrl = data['prevUrl'] as String?;
             _nextUrl = data['nextUrl'] as String?;
             _tocUrl = data['tocUrl'] as String?;
@@ -713,24 +892,44 @@ class _ReaderScreenState extends State<ReaderScreen>
               _sourceBookTitle = nextBookTitle;
               _englishBookTitle = null;
             }
+            if (handingOff) {
+              // Attach live prefetch stream instead of clearing.
+              _translatedText = _prefetchPartialText;
+              _completedParts = List.from(_prefetchCompletedParts);
+              _chunkCurrent = _prefetchChunkCurrent;
+              _chunkTotal = _prefetchChunkTotal;
+              _translating = true;
+              _busy = false;
+            } else {
+              _translatedText = '';
+              _completedParts = [];
+            }
           });
           _scrollToTop();
           unawaited(_resolveEnglishTitles());
+
+          if (handingOff) {
+            // Stream continues via prefetch onProgress → UI.
+            // When prefetch finishes it will clear _translating.
+            return;
+          }
+
           var cached = StorageService.instance.getChapter(resolvedUrl);
-          if ((cached == null || cached.translatedText.isEmpty) &&
+          if ((cached == null || !cached.isFullyTranslated) &&
               (_prefetchUrl == targetUrl || _prefetchUrl == resolvedUrl)) {
             await _prefetchFuture;
             cached = StorageService.instance.getChapter(resolvedUrl) ??
                 StorageService.instance.getChapter(targetUrl);
           }
           if (!mounted) return;
-          if (cached != null && cached.translatedText.isNotEmpty) {
+          if (cached != null && cached.isFullyTranslated) {
             await StorageService.instance.touchLastRead(cached.url);
             if (!mounted) return;
             setState(() {
               _translatedText = cached!.translatedText;
               _englishChapterTitle ??= cached.chapterTitleEnglish;
               _englishBookTitle ??= cached.bookTitleEnglish;
+              _completedParts = [];
               _busy = false;
             });
             _restoreProgress(cached.scrollPosition);
@@ -738,6 +937,22 @@ class _ReaderScreenState extends State<ReaderScreen>
             if (!mounted) return;
             if (_continuousEnabled) {
               _prefetchFuture = _prefetchNextChapter();
+            }
+          } else if (cached != null &&
+              cached.completedSourceChunks > 0 &&
+              cached.translatedText.isNotEmpty) {
+            // Resume a partial checkpoint for this chapter.
+            _completedParts = cached.translatedText
+                .split('\n\n')
+                .where((p) => p.trim().isNotEmpty)
+                .take(cached.completedSourceChunks)
+                .toList();
+            setState(() {
+              _translatedText = _completedParts.join('\n\n');
+              _busy = false;
+            });
+            if (_continuousEnabled) {
+              await _startTranslation(keepCheckpoint: true);
             }
           } else if (_continuousEnabled) {
             await _startTranslation();
@@ -842,9 +1057,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   String get _displayText {
     switch (_viewMode) {
       case ReaderViewMode.english:
-        return _translatedText.isEmpty
-            ? ''
-            : _translatedText;
+        return _translatedText.isEmpty ? '' : _translatedText;
       case ReaderViewMode.source:
         return _rawText;
       case ReaderViewMode.bilingual:
@@ -969,7 +1182,9 @@ class _ReaderScreenState extends State<ReaderScreen>
               child: SizedBox(
                 width: double.infinity,
                 child: OutlinedButton.icon(
-                  onPressed: _busy ? null : () => _startTranslation(force: true),
+                  onPressed: _busy
+                      ? null
+                      : () => _startTranslation(force: true),
                   icon: const Icon(Icons.translate, size: 18),
                   label: const Text('Translate this chapter'),
                 ),
@@ -990,7 +1205,8 @@ class _ReaderScreenState extends State<ReaderScreen>
                           Icon(
                             Icons.auto_stories_outlined,
                             size: 40,
-                            color: AppTheme.textSecondary.withValues(alpha: 0.5),
+                            color: AppTheme.textSecondary
+                                .withValues(alpha: 0.5),
                           ),
                           const SizedBox(height: 12),
                           const Text(
@@ -1033,7 +1249,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         hasNext: _nextUrl != null,
         hasToc: _tocUrl != null,
         autoTranslateEnabled: _continuousEnabled,
-        autoTranslateBusy: _prefetching,
+        autoTranslateBusy: _prefetching && !_prefetchHandoff,
         onAutoTranslateChanged: (enabled) {
           _setContinuousEnabled(enabled);
         },
