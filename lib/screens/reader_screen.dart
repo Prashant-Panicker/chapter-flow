@@ -42,3 +42,57 @@ class ReaderScreen extends StatefulWidget {
   @override
   State<ReaderScreen> createState() => _ReaderScreenState();
 }
+
+class _ReaderScreenState extends State<ReaderScreen>
+    with WidgetsBindingObserver {
+  static const _mobileChromeUA =
+      'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 '
+      '(KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36';
+
+  late String _url;
+  late String _pageTitle;
+  late String _rawText;
+  String _translatedText = '';
+  String _sourceBookTitle = '';
+  String? _englishBookTitle;
+  String _sourceChapterTitle = '';
+  String? _englishChapterTitle;
+  String? _chapterNumber;
+  String? _prevUrl;
+  String? _nextUrl;
+  String? _tocUrl;
+
+  final ScrollController _scrollController = ScrollController();
+
+  ReaderViewMode _viewMode = ReaderViewMode.english;
+  bool _continuousEnabled = false;
+  bool _busy = false;
+  bool _translating = false;
+  bool _cancelRequested = false;
+  bool _prefetching = false;
+  bool _prefetchCancelRequested = false;
+  bool _appInBackground = false;
+  bool _resumeTranslation = false;
+  bool _prefetchHandoff = false;
+  String? _prefetchUrl;
+  Future<void>? _prefetchFuture;
+  TranslationService? _activeTranslator;
+  TranslationService? _prefetchTranslator;
+  Completer<Map<String, dynamic>>? _prefetchExtractionCompleter;
+  HeadlessInAppWebView? _prefetchWebView;
+  Timer? _translationUiTimer;
+  String? _pendingTranslatedText;
+  int _pendingChunkCurrent = 0;
+  int _pendingChunkTotal = 0;
+  int _continuousChangeId = 0;
+  int _chunkCurrent = 0;
+  int _chunkTotal = 0;
+  double _fontSize = StorageService.defaultFontSize;
+  List<String> _completedParts = [];
+  String _prefetchPartialText = '';
+  int _prefetchChunkCurrent = 0;
+  int _prefetchChunkTotal = 0;
+  List<String> _prefetchCompletedParts = [];
+
+  // FILE_CONTINUES_IN_NEXT_UPDATE
+}
