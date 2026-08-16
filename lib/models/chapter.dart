@@ -28,6 +28,14 @@ class Chapter {
   final String? nextUrl;
   final String? tocUrl;
 
+  /// How many source chunks have been fully translated into [translatedText].
+  ///
+  /// 0 means either not started, or the chapter is fully done (existing
+  /// chapters and finished translations). A positive value means an
+  /// in-progress checkpoint: [translatedText] holds the first N chunks and
+  /// translation can resume from chunk N without re-sending them.
+  final int completedSourceChunks;
+
   Chapter({
     required this.id,
     required this.url,
@@ -45,7 +53,12 @@ class Chapter {
     this.prevUrl,
     this.nextUrl,
     this.tocUrl,
+    this.completedSourceChunks = 0,
   });
+
+  /// True when [translatedText] is a finished translation, not a checkpoint.
+  bool get isFullyTranslated =>
+      translatedText.isNotEmpty && completedSourceChunks == 0;
 
   /// A novel is identified by its source-language title plus the site it is
   /// hosted on, so the same novel on two sites stays two library entries.
@@ -88,6 +101,7 @@ class Chapter {
     String? prevUrl,
     String? nextUrl,
     String? tocUrl,
+    int? completedSourceChunks,
   }) {
     return Chapter(
       id: id,
@@ -106,6 +120,8 @@ class Chapter {
       prevUrl: prevUrl ?? this.prevUrl,
       nextUrl: nextUrl ?? this.nextUrl,
       tocUrl: tocUrl ?? this.tocUrl,
+      completedSourceChunks:
+          completedSourceChunks ?? this.completedSourceChunks,
     );
   }
 }
@@ -140,13 +156,14 @@ class ChapterAdapter extends TypeAdapter<Chapter> {
       bookTitleEnglish: fields[13] as String?,
       chapterNumber: fields[14] as String?,
       chapterTitleEnglish: fields[15] as String?,
+      completedSourceChunks: fields[16] as int? ?? 0,
     );
   }
 
   @override
   void write(BinaryWriter writer, Chapter obj) {
     writer
-      ..writeByte(16)
+      ..writeByte(17)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
@@ -178,6 +195,8 @@ class ChapterAdapter extends TypeAdapter<Chapter> {
       ..writeByte(14)
       ..write(obj.chapterNumber)
       ..writeByte(15)
-      ..write(obj.chapterTitleEnglish);
+      ..write(obj.chapterTitleEnglish)
+      ..writeByte(16)
+      ..write(obj.completedSourceChunks);
   }
 }

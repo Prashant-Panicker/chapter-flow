@@ -364,6 +364,11 @@ class TranslationService {
   }
 
   /// Splits raw source text into paragraph-respecting chunks.
+  ///
+  /// Public so the reader can count chunks for checkpoint resume without
+  /// duplicating the split logic.
+  List<String> chunkText(String text) => _chunk(text);
+
   List<String> _chunk(String text) {
     final paragraphs =
         text.split(RegExp(r'\n+')).where((p) => p.trim().isNotEmpty).toList();
@@ -418,12 +423,20 @@ class TranslationService {
   /// [shouldCancel] is checked before each call and during the response stream.
   /// [glossary] is read fresh before every chunk, so bindings discovered while
   /// the chapter is still translating apply to the chunks that follow.
+  ///
+  /// Resume support: pass [startFromChunk] and [priorParts] from a checkpoint
+  /// so already-finished chunks are not re-sent to the API. [onChunkComplete]
+  /// fires after each successful chunk with the durable partial text.
   Future<String> translateChapter({
     required String rawText,
     required void Function(int current, int total, String partialText)
         onProgress,
     required bool Function() shouldCancel,
     List<GlossaryEntry> Function()? glossary,
+    int startFromChunk = 0,
+    List<String> priorParts = const [],
+    void Function(int completedChunks, int total, String partialText)?
+        onChunkComplete,
   }) {
     return _enqueueTranslation(
       () => _translateChapter(
@@ -431,6 +444,9 @@ class TranslationService {
         onProgress: onProgress,
         shouldCancel: shouldCancel,
         glossary: glossary,
+        startFromChunk: startFromChunk,
+        priorParts: priorParts,
+        onChunkComplete: onChunkComplete,
       ),
     );
   }
@@ -456,14 +472,27 @@ class TranslationService {
         onProgress,
     required bool Function() shouldCancel,
     List<GlossaryEntry> Function()? glossary,
+    int startFromChunk = 0,
+    List<String> priorParts = const [],
+    void Function(int completedChunks, int total, String partialText)?
+        onChunkComplete,
   }) async {
     final chunks = _chunk(rawText);
     if (chunks.isEmpty) return '';
 
     final total = chunks.length;
-    final translatedParts = <String>[];
+    final safeStart = startFromChunk.clamp(0, total);
+    final translatedParts = <String>[
+      ...priorParts.take(safeStart),
+    ];
 
-    for (var i = 0; i < total; i++) {
+    // Surface any already-finished work immediately so the UI is not blank
+    // while the next chunk is still in flight.
+    if (translatedParts.isNotEmpty) {
+      onProgress(safeStart, total, translatedParts.join('\n\n'));
+    }
+
+    for (var i = safeStart; i < total; i++) {
       if (shouldCancel()) {
         throw TranslationCancelledException();
       }
@@ -487,7 +516,9 @@ class TranslationService {
         },
       );
       translatedParts.add(translated);
-      onProgress(i + 1, total, translatedParts.join('\n\n'));
+      final joined = translatedParts.join('\n\n');
+      onProgress(i + 1, total, joined);
+      onChunkComplete?.call(i + 1, total, joined);
     }
 
     return translatedParts.join('\n\n');
@@ -617,7 +648,8 @@ class TranslationService {
   Future<void> _waitBeforeRetry(
     Duration delay,
     bool Function() shouldCancel,
-  ) async {    await Future.any<void>([
+  ) async {
+    await Future.any<void>([
       Future<void>.delayed(delay),
       _cancelToken.whenCancel.then<void>((_) {}),
     ]);
