@@ -1,0 +1,50 @@
+name: Restore reader_screen
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore fixed reader_screen.dart
+        run: |
+          python3 <<'PY'
+          import urllib.request
+          from pathlib import Path
+
+          url = (
+              "https://raw.githubusercontent.com/Prashant-Panicker/chapter-flow/"
+              "63f348149eebf0ac0297dc4e076a9c3536db58ff/lib/screens/reader_screen.dart"
+          )
+          text = urllib.request.urlopen(url).read().decode()
+          text = text.replace(
+              "  List<String> _prefetchCompletedParts = [];\n  String _prefetchRawText = '';\n",
+              "  List<String> _prefetchCompletedParts = [];\n",
+          )
+          text = text.replace(
+              "      _prefetchCompletedParts = [];\n      _prefetchRawText = '';\n",
+              "      _prefetchCompletedParts = [];\n",
+          )
+          text = text.replace(
+              "      final rawText = (data['bodyText'] as String? ?? '').trim();\n      _prefetchRawText = rawText;\n",
+              "      final rawText = (data['bodyText'] as String? ?? '').trim();\n",
+          )
+          assert "_prefetchRawText" not in text
+          path = Path("lib/screens/reader_screen.dart")
+          path.write_text(text)
+          print("wrote", path, "bytes", path.stat().st_size)
+          PY
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add lib/screens/reader_screen.dart
+          git commit -m "fix: restore reader_screen.dart and remove unused _prefetchRawText"
+          git push
