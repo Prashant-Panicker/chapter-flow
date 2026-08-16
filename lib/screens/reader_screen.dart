@@ -231,7 +231,11 @@ class _ReaderScreenState extends State<ReaderScreen>
       }
       return null;
     }
-    return TranslationService(apiKey: key);
+    final gist = await StorageService.instance.getGistMode();
+    return TranslationService(
+      apiKey: key,
+      mode: gist ? TranslationMode.gist : TranslationMode.full,
+    );
   }
 
   Future<void> _startTranslation({
