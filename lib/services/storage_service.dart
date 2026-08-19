@@ -103,9 +103,7 @@ class StorageService {
   // ---------------- Chapters (key = chapter URL / id) ----------------
 
   Future<void> saveChapter(Chapter chapter) async {
-    if (true) {
-      await _chaptersBox.put(chapter.id, chapter);
-    }
+    await _chaptersBox.put(chapter.id, chapter);
   }
 
   Chapter? getChapter(String url) => _chaptersBox.get(url);
