@@ -5,13 +5,11 @@ import 'package:dio/dio.dart';
 
 import '../models/glossary_entry.dart';
 import 'ai_provider.dart';
+import 'translation_engine.dart';
 import 'translation_exceptions.dart';
 import 'translation_prompts.dart';
 
 export 'translation_exceptions.dart';
-
-part 'translation_streaming.dart';
-part 'translation_core.dart';
 
 class TranslationService {
   TranslationService({
@@ -26,33 +24,28 @@ class TranslationService {
             'Content-Type': 'application/json',
           },
           connectTimeout: const Duration(seconds: 30),
-          // Streaming keeps the connection alive with continuous data,
-          // so a longer receiveTimeout is safe as a backstop.
           receiveTimeout: const Duration(minutes: 10),
-        ));
+        )) {
+    _engine = TranslationEngine(
+      dio: _dio,
+      model: model,
+      mode: mode,
+      provider: provider,
+      cancelToken: _cancelToken,
+      modelParams: _modelParams,
+    );
+  }
 
   final TranslationMode mode;
   final AiProvider provider;
   final String model;
   final Dio _dio;
   final CancelToken _cancelToken = CancelToken();
+  late final TranslationEngine _engine;
   static Future<void> _translationQueue = Future<void>.value();
   static final Map<String, String> _titleCache = <String, String>{};
 
-  /// The English output has to fit the server's default output limit, so
-  /// this stays at the size that is known to complete reliably. The glossary
-  /// is what keeps naming consistent across the extra seams.
-  static const int _chunkChars = 3000;
-
-  /// Upper bound on how much of a chapter is sent for glossary extraction.
   static const int _glossarySampleChars = 12000;
-
-  /// Caps how many bindings are injected into a single chunk prompt.
-  static const int _maxInjectedTerms = 60;
-
-  /// How much of the previous chunk's English is carried forward for tone
-  /// and pronoun continuity.
-  static const int _continuityChars = 400;
 
   void cancel() {
     if (!_cancelToken.isCancelled) {
@@ -60,9 +53,6 @@ class TranslationService {
     }
   }
 
-  /// Builds the common model / temperature / thinking fields for a request.
-  /// Both Kimi and DeepSeek accept a `thinking` object. Kimi additionally
-  /// requires temperature 0.6 when thinking is off and 1.0 when on.
   Map<String, dynamic> _modelParams({
     required bool thinkingEnabled,
     bool stream = false,
@@ -75,18 +65,13 @@ class TranslationService {
       'thinking': {'type': thinkingEnabled ? 'enabled' : 'disabled'},
     };
     if (provider.tiesTemperatureToThinking) {
-      // kimi-k2.6: 0.6 when thinking disabled, 1.0 when enabled.
       map['temperature'] = thinkingEnabled ? 1.0 : 0.6;
     } else {
-      // DeepSeek: lower temp for stable translation; thinking off for speed.
       map['temperature'] = thinkingEnabled ? 1.0 : 0.3;
     }
     return map;
   }
 
-  /// Translates a novel name or chapter heading into English. Short,
-  /// single-shot request that stays out of the chapter queue so it never
-  /// blocks chapter translation. Returns an empty string on failure.
   Future<String> translateTitle(String title) async {
     final source = title.trim();
     if (source.isEmpty) return '';
@@ -135,24 +120,19 @@ class TranslationService {
     }
   }
 
-  /// Verifies authentication without consuming completion tokens.
   Future<void> validateApiKey() async {
     try {
       final response = await _dio.get<Map<String, dynamic>>('/models');
       final models = response.data?['data'];
       if (models is! List) {
-        throw ApiKeyValidationException(
-          'Could not verify key.',
-        );
+        throw ApiKeyValidationException('Could not verify key.');
       }
     } on ApiKeyValidationException {
       rethrow;
     } on DioException catch (e) {
       final status = e.response?.statusCode;
       if (status == 401 || status == 403) {
-        throw ApiKeyValidationException(
-          'Invalid API key.',
-        );
+        throw ApiKeyValidationException('Invalid API key.');
       }
       throw ApiKeyValidationException(
         'Could not verify key. Check your connection.',
@@ -160,11 +140,6 @@ class TranslationService {
     }
   }
 
-  /// Extracts term bindings from a chapter's source text.
-  ///
-  /// Deliberately kept out of [_translationQueue] and off the critical path:
-  /// callers run it alongside the first chunk so it adds no perceived delay,
-  /// and every failure mode returns an empty list rather than throwing.
   Future<List<GlossaryEntry>> extractGlossary({
     required String rawText,
     required List<GlossaryEntry> known,
@@ -176,8 +151,6 @@ class TranslationService {
     if (sample.trim().length < 200) return const [];
     if (shouldCancel()) return const [];
 
-    // Only mention terms that actually occur here, so the prompt stays small
-    // however long the novel gets.
     final relevant = known
         .where((e) => sample.contains(e.source))
         .take(80)
@@ -193,7 +166,6 @@ class TranslationService {
         '/chat/completions',
         cancelToken: _cancelToken,
         data: {
-          // Glossary benefits from thinking on Kimi; DeepSeek uses plain call.
           ..._modelParams(thinkingEnabled: true, maxTokens: 16000),
           'messages': [
             {'role': 'system', 'content': kGlossarySystemPrompt},
@@ -229,55 +201,101 @@ class TranslationService {
     }
   }
 
-  /// Picks the bindings worth spending prompt space on for this chunk.
-  /// Longer terms first: they are the most specific and the most likely to be
-  /// mistranslated if left unpinned.
-  List<GlossaryEntry> _relevantTerms(
-    String chunk,
-    List<GlossaryEntry> glossary,
-  ) {
-    if (glossary.isEmpty) return const [];
-    final matches =
-        glossary.where((e) => chunk.contains(e.source)).toList(growable: false);
-    if (matches.length <= _maxInjectedTerms) return matches;
-    final sorted = matches.toList()
-      ..sort((a, b) => b.source.length.compareTo(a.source.length));
-    return sorted.take(_maxInjectedTerms).toList(growable: false);
-  }
+  List<String> chunkText(String text) => _engine.chunkText(text);
 
-  String _glossaryBlock(List<GlossaryEntry> terms) {
-    if (terms.isEmpty) return '';
-    final names =
-        terms.where((e) => e.style == GlossaryStyle.pinyin).toList();
-    final concepts =
-        terms.where((e) => e.style == GlossaryStyle.english).toList();
-
-    String describe(GlossaryEntry e) => e.type.isEmpty
-        ? '${e.source} = ${e.english}'
-        : '${e.source} = ${e.english}  (${e.type})';
-
-    final buffer = StringBuffer(
-      'GLOSSARY for this novel. These renderings are already established — '
-      'reuse them exactly, do not invent alternatives.\n',
+  Future<String> translateChapter({
+    required String rawText,
+    required void Function(int current, int total, String partialText)
+        onProgress,
+    required bool Function() shouldCancel,
+    List<GlossaryEntry> Function()? glossary,
+    int startFromChunk = 0,
+    List<String> priorParts = const [],
+    void Function(int completedChunks, int total, String partialText)?
+        onChunkComplete,
+  }) {
+    return _enqueueTranslation(
+      () => _translateChapter(
+        rawText: rawText,
+        onProgress: onProgress,
+        shouldCancel: shouldCancel,
+        glossary: glossary,
+        startFromChunk: startFromChunk,
+        priorParts: priorParts,
+        onChunkComplete: onChunkComplete,
+      ),
     );
-    if (names.isNotEmpty) {
-      buffer.writeln('\nWrite these as shown (Pinyin names, never translated):');
-      for (final e in names) {
-        buffer.writeln('- ${describe(e)}');
-      }
-    }
-    if (concepts.isNotEmpty) {
-      buffer.writeln('\nUse these exact English terms:');
-      for (final e in concepts) {
-        buffer.writeln('- ${describe(e)}');
-      }
-    }
-    if (names.isNotEmpty && concepts.isNotEmpty) {
-      buffer.writeln(
-        '\nIf the same term appears in both lists, choose by context: the '
-        'Pinyin form names a specific individual, the English form names a '
-        'kind of thing.',
-      );
-    }
-    return buffer.toString();
   }
+
+  Future<T> _enqueueTranslation<T>(Future<T> Function() operation) {
+    final result = Completer<T>();
+    _translationQueue = _translationQueue.then((_) async {
+      try {
+        if (_cancelToken.isCancelled) {
+          throw TranslationCancelledException();
+        }
+        result.complete(await operation());
+      } catch (error, stackTrace) {
+        result.completeError(error, stackTrace);
+      }
+    });
+    return result.future;
+  }
+
+  Future<String> _translateChapter({
+    required String rawText,
+    required void Function(int current, int total, String partialText)
+        onProgress,
+    required bool Function() shouldCancel,
+    List<GlossaryEntry> Function()? glossary,
+    int startFromChunk = 0,
+    List<String> priorParts = const [],
+    void Function(int completedChunks, int total, String partialText)?
+        onChunkComplete,
+  }) async {
+    final chunks = _engine.chunkText(rawText);
+    if (chunks.isEmpty) return '';
+
+    final total = chunks.length;
+    final safeStart = startFromChunk.clamp(0, total);
+    final translatedParts = <String>[
+      ...priorParts.take(safeStart),
+    ];
+
+    if (translatedParts.isNotEmpty) {
+      onProgress(safeStart, total, translatedParts.join('\n\n'));
+    }
+
+    for (var i = safeStart; i < total; i++) {
+      if (shouldCancel()) {
+        throw TranslationCancelledException();
+      }
+      final terms =
+          _engine.relevantTerms(chunks[i], glossary?.call() ?? const []);
+      final continuity = translatedParts.isEmpty
+          ? ''
+          : _engine.tailOf(translatedParts.last, TranslationEngine.continuityChars);
+      final translated = await _engine.translateChunkWithRetry(
+        chunks[i],
+        index: i,
+        total: total,
+        terms: terms,
+        continuity: continuity,
+        shouldCancel: shouldCancel,
+        onStreamProgress: (partialChunk) {
+          onProgress(
+            i + 1,
+            total,
+            [...translatedParts, partialChunk].join('\n\n'),
+          );
+        },
+      );
+      translatedParts.add(translated);
+      final joined = translatedParts.join('\n\n');
+      onProgress(i + 1, total, joined);
+      onChunkComplete?.call(i + 1, total, joined);
+    }
+
+    return translatedParts.join('\n\n');
+  }
+}
