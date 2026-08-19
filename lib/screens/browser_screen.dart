@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
+import '../main.dart' show rootTabIndex;
 import '../services/extraction_js.dart';
 import '../services/js_result.dart';
 import '../services/storage_service.dart';
@@ -17,10 +18,11 @@ class BrowserScreen extends StatefulWidget {
 class _BrowserScreenState extends State<BrowserScreen> {
   InAppWebViewController? _controller;
   final TextEditingController _addressController = TextEditingController();
+  final FocusNode _addressFocusNode = FocusNode();
+  final ValueNotifier<double> _progress = ValueNotifier(0);
   String _currentUrl = 'about:blank';
   bool _loading = false;
   bool _extracting = false;
-  double _progress = 0;
   bool _startUrlReady = false;
   String _startUrl = 'about:blank';
   bool _canGoBack = false;
@@ -44,6 +46,8 @@ class _BrowserScreenState extends State<BrowserScreen> {
   @override
   void dispose() {
     _addressController.dispose();
+    _addressFocusNode.dispose();
+    _progress.dispose();
     super.dispose();
   }
 
@@ -57,6 +61,12 @@ class _BrowserScreenState extends State<BrowserScreen> {
           _startUrl == 'about:blank' ? '' : _startUrl;
       _startUrlReady = true;
     });
+  }
+
+  void _updateAddressBar(String? newUrl) {
+    // Only sync the field while the user isn't actively editing it.
+    if (newUrl == null || _addressFocusNode.hasFocus) return;
+    _addressController.text = newUrl;
   }
 
   Future<void> _updateNav() async {
@@ -130,7 +140,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
           ),
         ),
       );
-    } catch (e) {
+    } catch (_) {
       _showSnack('Could not open reader.');
     } finally {
       if (mounted) setState(() => _extracting = false);
@@ -180,27 +190,43 @@ class _BrowserScreenState extends State<BrowserScreen> {
     _showSnack(message, withRetry: true);
   }
 
+  bool get _isHttps => Uri.tryParse(_currentUrl)?.scheme == 'https';
+
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: AppTheme.bg,
-      appBar: AppBar(
-        titleSpacing: 8,
-        title: Container(
-          height: 40,
-          decoration: BoxDecoration(
-            color: AppTheme.surfaceAlt,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: AppTheme.border),
-          ),
-          padding: const EdgeInsets.symmetric(horizontal: 10),
-          child: Row(
-            children: [
-              const Icon(Icons.lock_outline, size: 14, color: AppTheme.textSecondary),
+    return PopScope(
+      canPop: rootTabIndex.value != 0 || !_canGoBack,
+      onPopInvokedWithResult: (didPop, result) async {
+        if (didPop) return;
+        if (rootTabIndex.value == 0 && _canGoBack) {
+          await _controller?.goBack();
+          await _updateNav();
+        }
+      },
+      child: Scaffold(
+        backgroundColor: AppTheme.bg,
+        appBar: AppBar(
+          titleSpacing: 8,
+          title: Container(
+            height: 40,
+            decoration: BoxDecoration(
+              color: AppTheme.surfaceAlt,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: AppTheme.border),
+            ),
+            padding: const EdgeInsets.symmetric(horizontal: 10),
+            child: Row(
+              children: [
+                Icon(
+                  _isHttps ? Icons.lock_rounded : Icons.lock_open_rounded,
+                  size: 14,
+                  color: _isHttps ? AppTheme.accent : AppTheme.textSecondary,
+                ),
               const SizedBox(width: 8),
               Expanded(
                 child: TextField(
                   controller: _addressController,
+                  focusNode: _addressFocusNode,
                   style: const TextStyle(
                     color: AppTheme.textPrimary,
                     fontSize: 13.5,
@@ -289,13 +315,16 @@ class _BrowserScreenState extends State<BrowserScreen> {
       ),
       body: Column(
         children: [
-          AnimatedContainer(
-            duration: const Duration(milliseconds: 150),
-            height: _loading ? 2 : 0,
-            child: LinearProgressIndicator(
-              value: _progress == 0 ? null : _progress,
-              minHeight: 2,
-              backgroundColor: AppTheme.surface,
+          ValueListenableBuilder<double>(
+            valueListenable: _progress,
+            builder: (context, progress, _) => AnimatedContainer(
+              duration: const Duration(milliseconds: 150),
+              height: _loading ? 2 : 0,
+              child: LinearProgressIndicator(
+                value: progress == 0 ? null : progress,
+                minHeight: 2,
+                backgroundColor: AppTheme.surface,
+              ),
             ),
           ),
           Expanded(
@@ -332,13 +361,12 @@ class _BrowserScreenState extends State<BrowserScreen> {
                         _loading = true;
                         if (url != null) {
                           _currentUrl = url.toString();
-                          _addressController.text = _currentUrl;
+                          _updateAddressBar(_currentUrl);
                         }
                       });
                     },
                     onProgressChanged: (controller, progress) {
-                      if (!mounted) return;
-                      setState(() => _progress = progress / 100);
+                      _progress.value = progress / 100;
                     },
                     onLoadStop: (controller, url) async {
                       if (!mounted) return;
@@ -346,7 +374,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
                         _loading = false;
                         if (url != null) {
                           _currentUrl = url.toString();
-                          _addressController.text = _currentUrl;
+                          _updateAddressBar(_currentUrl);
                         }
                       });
                       await StorageService.instance.setLastUrl(_currentUrl);
@@ -358,7 +386,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
                       if (url != null) {
                         setState(() {
                           _currentUrl = url.toString();
-                          _addressController.text = _currentUrl;
+                          _updateAddressBar(_currentUrl);
                         });
                         StorageService.instance.setLastUrl(_currentUrl);
                       }

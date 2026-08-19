@@ -16,6 +16,7 @@ class ReaderNavBar extends StatelessWidget {
     required this.autoTranslateBusy,
     required this.onAutoTranslateChanged,
     this.busy = false,
+    this.showAutoTranslate = true,
   });
 
   final bool hasPrev;
@@ -28,6 +29,7 @@ class ReaderNavBar extends StatelessWidget {
   final bool autoTranslateBusy;
   final ValueChanged<bool> onAutoTranslateChanged;
   final bool busy;
+  final bool showAutoTranslate;
 
   @override
   Widget build(BuildContext context) {
@@ -46,24 +48,25 @@ class ReaderNavBar extends StatelessWidget {
               ),
               child: Row(
                 children: [
-              Expanded(
-                child: _ToggleButton(
-                  enabled: autoTranslateEnabled,
-                  busy: autoTranslateBusy,
-                  onChanged: onAutoTranslateChanged,
-                  showLabel: showLabels,
-                ),
-              ),
-              const SizedBox(width: 6),
-              Expanded(
-                child: _NavButton(
-                  icon: Icons.chevron_left_rounded,
-                  label: 'Prev',
-                  showLabel: showLabels,
-                  enabled: hasPrev && !busy,
-                  onTap: onPrev,
-                ),
-              ),
+                  if (showAutoTranslate)
+                    Expanded(
+                      child: _ToggleButton(
+                        enabled: autoTranslateEnabled,
+                        busy: autoTranslateBusy,
+                        onChanged: onAutoTranslateChanged,
+                        showLabel: showLabels,
+                      ),
+                    ),
+                  if (showAutoTranslate) const SizedBox(width: 6),
+                  Expanded(
+                    child: _NavButton(
+                      icon: Icons.chevron_left_rounded,
+                      label: 'Prev',
+                      showLabel: showLabels,
+                      enabled: hasPrev && !busy,
+                      onTap: onPrev,
+                    ),
+                  ),
               const SizedBox(width: 6),
               Expanded(
                 child: _NavButton(

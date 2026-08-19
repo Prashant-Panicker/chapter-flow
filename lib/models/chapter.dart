@@ -36,6 +36,14 @@ class Chapter {
   /// translation can resume from chunk N without re-sending them.
   final int completedSourceChunks;
 
+  /// The exact per-chunk translated text backing a checkpoint.
+  ///
+  /// [translatedText] is these parts joined with `\n\n`, but a chunk's own
+  /// text may itself contain paragraph breaks, so re-splitting the joined
+  /// text on `\n\n` can't recover the original chunk boundaries. Only
+  /// meaningful when [completedSourceChunks] is greater than 0.
+  final List<String>? checkpointParts;
+
   Chapter({
     required this.id,
     required this.url,
@@ -54,6 +62,7 @@ class Chapter {
     this.nextUrl,
     this.tocUrl,
     this.completedSourceChunks = 0,
+    this.checkpointParts,
   });
 
   /// True when [translatedText] is a finished translation, not a checkpoint.
@@ -102,7 +111,9 @@ class Chapter {
     String? nextUrl,
     String? tocUrl,
     int? completedSourceChunks,
+    List<String>? checkpointParts,
   }) {
+    final chunks = completedSourceChunks ?? this.completedSourceChunks;
     return Chapter(
       id: id,
       url: url,
@@ -120,8 +131,10 @@ class Chapter {
       prevUrl: prevUrl ?? this.prevUrl,
       nextUrl: nextUrl ?? this.nextUrl,
       tocUrl: tocUrl ?? this.tocUrl,
-      completedSourceChunks:
-          completedSourceChunks ?? this.completedSourceChunks,
+      completedSourceChunks: chunks,
+      // A zero chunk count means there is no checkpoint, so the parts go too.
+      checkpointParts:
+          chunks > 0 ? (checkpointParts ?? this.checkpointParts) : null,
     );
   }
 }
@@ -157,13 +170,14 @@ class ChapterAdapter extends TypeAdapter<Chapter> {
       chapterNumber: fields[14] as String?,
       chapterTitleEnglish: fields[15] as String?,
       completedSourceChunks: fields[16] as int? ?? 0,
+      checkpointParts: (fields[17] as List?)?.cast<String>(),
     );
   }
 
   @override
   void write(BinaryWriter writer, Chapter obj) {
     writer
-      ..writeByte(17)
+      ..writeByte(18)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
@@ -197,6 +211,8 @@ class ChapterAdapter extends TypeAdapter<Chapter> {
       ..writeByte(15)
       ..write(obj.chapterTitleEnglish)
       ..writeByte(16)
-      ..write(obj.completedSourceChunks);
+      ..write(obj.completedSourceChunks)
+      ..writeByte(17)
+      ..write(obj.checkpointParts);
   }
 }

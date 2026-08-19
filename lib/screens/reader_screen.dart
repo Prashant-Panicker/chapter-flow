@@ -1,9 +1,11 @@
 import 'dart:async';
 
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
 import '../models/chapter.dart';
+import '../models/glossary_entry.dart';
 import '../services/ai_provider.dart';
 import '../services/extraction_js.dart';
 import '../services/js_result.dart';
@@ -65,22 +67,24 @@ class _ReaderScreenState extends State<ReaderScreen>
   bool _continuousEnabled = false;
   bool _busy = false;
   bool _translating = false;
+  int _translationAttemptId = 0; // Per-attempt token to prevent state races
   bool _cancelRequested = false;
-  bool _appInBackground = false;
   bool _resumeTranslation = false;
   TranslationService? _activeTranslator;
-  Timer? _translationUiTimer;
   int _chunkCurrent = 0;
   int _chunkTotal = 0;
   double _fontSize = StorageService.defaultFontSize;
   List<String> _completedParts = [];
+  int _checkpointChunks = 0; // Chunk count backing _completedParts, for resume
+  List<GlossaryEntry> _glossary = []; // Extracted glossary for this series
+  bool _glossaryReady = false; // True once this chapter's terms were extracted
+  List<GlossaryEntry> _pendingGlossary = []; // Extracted, not yet persisted
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _cancelRequested = true;
     _activeTranslator?.cancel();
-    _translationUiTimer?.cancel();
     _persistProgress();
     _scrollController.dispose();
     super.dispose();
@@ -108,13 +112,14 @@ class _ReaderScreenState extends State<ReaderScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      _appInBackground = false;
       _resumeAfterBackground();
       return;
     }
     _persistProgress();
-    if (state == AppLifecycleState.detached) {
-      _appInBackground = true;
+    // `inactive` fires for transient events (app switcher, control centre,
+    // permission dialogs); only paused/detached mean the app left the foreground.
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
       if (_translating) {
         _resumeTranslation = true;
         _cancelRequested = true;
@@ -124,7 +129,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   void _resumeAfterBackground() {
-    if (!mounted || _appInBackground) return;
+    if (!mounted) return;
     if (_resumeTranslation && !_translating) {
       _resumeTranslation = false;
       _startTranslation(force: true, keepCheckpoint: true);
@@ -141,15 +146,13 @@ class _ReaderScreenState extends State<ReaderScreen>
       _fontSize = fontSize;
       if (cached != null && cached.translatedText.isNotEmpty) {
         _translatedText = cached.translatedText;
-        if (cached.completedSourceChunks > 0) {
-          _completedParts = cached.translatedText
-              .split('\n\n')
-              .where((p) => p.trim().isNotEmpty)
-              .toList();
-          if (_completedParts.length > cached.completedSourceChunks) {
-            _completedParts =
-                _completedParts.take(cached.completedSourceChunks).toList();
-          }
+        // Only resume from an exact per-chunk checkpoint; re-splitting the
+        // joined text on '\n\n' can't recover the original chunk boundaries.
+        if (cached.completedSourceChunks > 0 &&
+            cached.checkpointParts != null &&
+            cached.checkpointParts!.isNotEmpty) {
+          _checkpointChunks = cached.completedSourceChunks;
+          _completedParts = List<String>.from(cached.checkpointParts!);
         }
       }
     });
@@ -195,40 +198,139 @@ class _ReaderScreenState extends State<ReaderScreen>
   }) async {
     final translator = await _buildTranslator();
     if (translator == null || !mounted) return;
+
+    // Increment attempt ID to prevent state races from stale attempts
+    _translationAttemptId++;
+    final attemptId = _translationAttemptId;
+
     _activeTranslator = translator;
     setState(() {
       _translating = true;
       _cancelRequested = false;
     });
+
+    final resumeChunks = keepCheckpoint ? _checkpointChunks : 0;
+    final resumeParts = keepCheckpoint ? _completedParts : const <String>[];
+    DateTime? lastCheckpointWrite;
+
     try {
+      final seriesKey = Chapter.seriesKeyFor(
+        Uri.tryParse(_url)?.host ?? '',
+        _sourceBookTitle,
+      );
+
+      // Resuming mid-chapter reuses the terms the first attempt extracted;
+      // re-running extraction would pay for the same request twice.
+      if (!_glossaryReady || resumeChunks == 0) {
+        _glossary = StorageService.instance.glossaryFor(seriesKey).toList();
+        _pendingGlossary = [];
+        if (!_cancelRequested) {
+          final extracted = await translator.extractGlossary(
+            rawText: _rawText,
+            known: _glossary,
+            shouldCancel: () =>
+                _cancelRequested || _translationAttemptId != attemptId,
+          );
+          if (extracted.isNotEmpty &&
+              !_cancelRequested &&
+              _translationAttemptId == attemptId) {
+            _glossary.addAll(extracted);
+            _pendingGlossary = extracted;
+          }
+        }
+        _glossaryReady = true;
+      }
+
+      // Translate the chapter with glossary context, resuming from any checkpoint
       final result = await translator.translateChapter(
         rawText: _rawText,
-        shouldCancel: () => _cancelRequested,
+        glossary: () => _glossary,
+        shouldCancel: () => _cancelRequested || _translationAttemptId != attemptId,
+        startFromChunk: resumeChunks,
+        priorParts: resumeParts,
         onProgress: (current, total, partial) {
-          if (!mounted) return;
+          if (!mounted || _translationAttemptId != attemptId) return;
           setState(() {
             _chunkCurrent = current;
             _chunkTotal = total;
             _translatedText = partial;
           });
         },
+        onChunkComplete: (completed, total, parts) {
+          if (_translationAttemptId != attemptId) return;
+          _checkpointChunks = completed;
+          _completedParts = List<String>.from(parts);
+          // The imminent final save below covers the last chunk; avoid a
+          // redundant double write to Hive.
+          if (completed == total) return;
+          // Throttle checkpoint writes so long chapters don't hit Hive every chunk.
+          final now = DateTime.now();
+          if (lastCheckpointWrite != null &&
+              now.difference(lastCheckpointWrite!) < const Duration(seconds: 5)) {
+            return;
+          }
+          lastCheckpointWrite = now;
+          unawaited(
+            _saveChapter(
+              checkpointChunks: completed,
+              checkpointParts: _completedParts,
+            ),
+          );
+        },
       );
-      if (!mounted) return;
+
+      // Verify this attempt is still current before updating state
+      if (_translationAttemptId != attemptId || !mounted) return;
+
       setState(() {
         _translatedText = result;
         _translating = false;
       });
-      await _saveChapter();
+
+      // Translation finished: clear the checkpoint and save the final text
+      _checkpointChunks = 0;
+      _completedParts = [];
+      await _saveChapter(checkpointChunks: 0);
+      if (_pendingGlossary.isNotEmpty) {
+        // Note: returns false if glossary hit capacity; for now we ignore this
+        // signal and rely on first-write-wins to preserve consistency.
+        // TODO: Consider showing a warning if glossary becomes full.
+        await StorageService.instance.mergeGlossary(
+          seriesKey,
+          _pendingGlossary,
+        );
+        _pendingGlossary = [];
+      }
     } on TranslationCancelledException {
+      if (_translationAttemptId != attemptId) return;
       if (mounted) setState(() => _translating = false);
+      await _flushCheckpoint();
     } catch (e) {
-      if (mounted) {
+      if (mounted && _translationAttemptId == attemptId) {
         setState(() => _translating = false);
-        _showSnack('Translation error: $e');
+        _showSnack('Translation error: ${_sanitizeError(e)}');
       }
     } finally {
       if (identical(_activeTranslator, translator)) _activeTranslator = null;
     }
+  }
+
+  String _sanitizeError(dynamic error) {
+    if (error is DioException) {
+      return 'Network error. Check your connection and API key.';
+    }
+    return error.toString();
+  }
+
+  /// Persists the chunks that finished before a cancellation, so a process
+  /// kill while backgrounded doesn't make the user pay for them again.
+  Future<void> _flushCheckpoint() async {
+    if (_checkpointChunks <= 0 || _completedParts.isEmpty) return;
+    _translatedText = _completedParts.join('\n\n');
+    await _saveChapter(
+      checkpointChunks: _checkpointChunks,
+      checkpointParts: _completedParts,
+    );
   }
 
   void _cancelTranslation() {
@@ -287,7 +389,10 @@ class _ReaderScreenState extends State<ReaderScreen>
     }
   }
 
-  Future<void> _saveChapter({int checkpointChunks = 0}) async {
+  Future<void> _saveChapter({
+    int checkpointChunks = 0,
+    List<String>? checkpointParts,
+  }) async {
     if (_translatedText.isEmpty) return;
     final uri = Uri.tryParse(_url);
     await StorageService.instance.saveChapter(
@@ -309,6 +414,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         nextUrl: _nextUrl,
         tocUrl: _tocUrl,
         completedSourceChunks: checkpointChunks,
+        checkpointParts: checkpointChunks > 0 ? checkpointParts : null,
       ),
     );
   }
@@ -363,6 +469,13 @@ class _ReaderScreenState extends State<ReaderScreen>
             _englishChapterTitle = null;
             _translatedText = '';
             _busy = false;
+            // A new chapter has nothing in common with the last one's
+            // checkpoint or glossary — discard both.
+            _checkpointChunks = 0;
+            _completedParts = [];
+            _glossary = [];
+            _glossaryReady = false;
+            _pendingGlossary = [];
           });
           if (_continuousEnabled) await _startTranslation();
           return;

@@ -36,7 +36,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _loadAll() async {
     final provider = await StorageService.instance.getAiProvider();
-    final key = await StorageService.instance.getApiKeyFor(provider);
+    // The keystore can be unavailable (locked, corrupted, or unmocked in
+    // tests); the rest of Settings still has to render.
+    String? key;
+    try {
+      key = await StorageService.instance.getApiKeyFor(provider);
+    } catch (_) {
+      key = null;
+    }
     final gist = await StorageService.instance.getGistMode();
     if (!mounted) return;
     setState(() {
@@ -82,7 +89,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _showSnack('API key saved for ${_provider.displayName}.');
     } on ApiKeyValidationException catch (e) {
       _showSnack(e.message);
-    } catch (e) {
+    } catch (_) {
       _showSnack('Could not save key.');
     } finally {
       if (mounted) setState(() => _saving = false);
@@ -115,8 +122,39 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final cookieManager = CookieManager.instance();
       await cookieManager.deleteAllCookies();
       _showSnack('Browser data cleared.');
-    } catch (e) {
+    } catch (_) {
       _showSnack('Could not clear browser data.');
+    }
+  }
+
+  Future<void> _cleanUpStorage() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Clean up old chapters?'),
+        content: const Text(
+          "Removes every saved chapter except each series' most recent "
+          'chapter and its immediate neighbours. This cannot be undone.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: TextButton.styleFrom(foregroundColor: AppTheme.danger),
+            child: const Text('Clean up'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await StorageService.instance.pruneAllSeries();
+      _showSnack('Old chapters removed.');
+    } catch (_) {
+      _showSnack('Could not clean up storage.');
     }
   }
 
@@ -326,6 +364,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
               onPressed: _clearWebViewData,
               icon: const Icon(Icons.cleaning_services_outlined, size: 18),
               label: const Text('Clear cache & cookies'),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        _sectionCard(
+          title: 'Storage',
+          children: [
+            const Text(
+              "Keeps only each saved series' most recent chapter plus its "
+              'immediate neighbours, freeing space used by older chapters.',
+              style: TextStyle(color: AppTheme.textSecondary, height: 1.4),
+            ),
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: _cleanUpStorage,
+              icon: const Icon(Icons.auto_delete_outlined, size: 18),
+              label: const Text('Clean up old chapters'),
             ),
           ],
         ),

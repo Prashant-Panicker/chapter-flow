@@ -97,7 +97,7 @@ class TranslationEngine {
     return sorted.take(maxInjectedTerms).toList(growable: false);
   }
 
-  String glossaryBlock(List<GlossaryEntry> terms) {
+  String _glossaryBlock(List<GlossaryEntry> terms) {
     if (terms.isEmpty) return '';
     final names =
         terms.where((e) => e.style == GlossaryStyle.pinyin).toList();
@@ -181,10 +181,10 @@ class TranslationEngine {
         if (!retryable || attempt >= retryLimit) {
           final msg = status == 429
               ? 'Rate limit reached. Try again shortly.'
-              : await describeApiError(e);
+              : await _describeApiError(e);
           throw TranslationChunkFailure(index, total, msg);
         }
-        await waitBeforeRetry(retryDelay(e, attempt), shouldCancel);
+        await _waitBeforeRetry(_retryDelay(e, attempt), shouldCancel);
       } catch (e) {
         if (shouldCancel()) {
           throw TranslationCancelledException();
@@ -193,7 +193,7 @@ class TranslationEngine {
         if (attempt >= 2) {
           throw TranslationChunkFailure(index, total, e.toString());
         }
-        await waitBeforeRetry(
+        await _waitBeforeRetry(
           Duration(seconds: 2 * (attempt + 1)),
           shouldCancel,
         );
@@ -206,7 +206,7 @@ class TranslationEngine {
     );
   }
 
-  Future<String> describeApiError(DioException e) async {
+  Future<String> _describeApiError(DioException e) async {
     final data = e.response?.data;
     String? body;
 
@@ -245,7 +245,7 @@ class TranslationEngine {
     return e.message ?? 'network error';
   }
 
-  Future<void> waitBeforeRetry(
+  Future<void> _waitBeforeRetry(
     Duration delay,
     bool Function() shouldCancel,
   ) async {
@@ -258,17 +258,17 @@ class TranslationEngine {
     }
   }
 
-  Duration retryDelay(DioException error, int attempt) {
+  Duration _retryDelay(DioException error, int attempt) {
     final headers = error.response?.headers;
     final retryAfter = headers?.value('retry-after');
-    final retryAfterDelay = parseRetryAfter(retryAfter);
+    final retryAfterDelay = _parseRetryAfter(retryAfter);
     if (retryAfterDelay != null) return retryAfterDelay;
 
     for (final name in const [
       'x-ratelimit-reset-tokens',
       'x-ratelimit-reset-requests',
     ]) {
-      final resetDelay = parseDuration(headers?.value(name));
+      final resetDelay = _parseDuration(headers?.value(name));
       if (resetDelay != null) return resetDelay;
     }
 
@@ -278,7 +278,7 @@ class TranslationEngine {
     return Duration(seconds: 2 * (attempt + 1));
   }
 
-  Duration? parseRetryAfter(String? value) {
+  Duration? _parseRetryAfter(String? value) {
     if (value == null) return null;
     final seconds = int.tryParse(value.trim());
     if (seconds != null) return Duration(seconds: seconds.clamp(1, 300));
@@ -291,7 +291,7 @@ class TranslationEngine {
     );
   }
 
-  Duration? parseDuration(String? value) {
+  Duration? _parseDuration(String? value) {
     if (value == null || value.trim().isEmpty) return null;
     final match = RegExp(
       r'^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+(?:\.\d+)?)s)?$',
@@ -314,7 +314,7 @@ class TranslationEngine {
     required void Function(String partialChunk) onStreamProgress,
   }) async {
     final prompt = StringBuffer();
-    final glossary = glossaryBlock(terms);
+    final glossary = _glossaryBlock(terms);
     if (glossary.isNotEmpty) {
       prompt
         ..write(glossary)

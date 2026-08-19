@@ -239,6 +239,7 @@ class _OfflineReaderScreenState extends State<OfflineReaderScreen>
         autoTranslateEnabled: _continuousEnabled,
         autoTranslateBusy: false,
         onAutoTranslateChanged: _setContinuousEnabled,
+        showAutoTranslate: false,
       ),
     );
   }

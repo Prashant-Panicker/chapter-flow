@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../main.dart' show rootTabIndex;
 import '../models/chapter.dart';
 import '../services/storage_service.dart';
 import '../services/translation_service.dart';
@@ -14,7 +15,7 @@ class LibraryScreen extends StatefulWidget {
 }
 
 class _LibraryScreenState extends State<LibraryScreen> {
-  late List<Chapter> _chapters;
+  List<Chapter> _chapters = [];
 
   /// Series we already tried to translate, so a failed lookup is not retried
   /// on every rebuild.
@@ -24,13 +25,22 @@ class _LibraryScreenState extends State<LibraryScreen> {
   @override
   void initState() {
     super.initState();
-    _refresh();
+    rootTabIndex.addListener(_onTabChanged);
+    // IndexedStack mounts every tab at launch; only refresh (and backfill
+    // titles) immediately if Library is already the active tab.
+    if (rootTabIndex.value == 1) _refresh();
   }
 
   @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    _refresh();
+  void dispose() {
+    rootTabIndex.removeListener(_onTabChanged);
+    super.dispose();
+  }
+
+  void _onTabChanged() {
+    // Library is tab index 1; IndexedStack keeps this screen's state alive
+    // across tab switches, so refresh explicitly when it becomes visible.
+    if (mounted && rootTabIndex.value == 1) _refresh();
   }
 
   void _refresh() {
@@ -45,20 +55,21 @@ class _LibraryScreenState extends State<LibraryScreen> {
     if (_translatingTitles) return;
     final pending = _chapters
         .where((c) =>
-            !_titleAttempts.contains(c.seriesKey) &&
+            !_titleAttempts.contains(c.id) &&
             (_needsTranslation(c.bookTitle, c.bookTitleEnglish) ||
                 _needsTranslation(c.chapterTitle, c.chapterTitleEnglish)))
         .toList();
     if (pending.isEmpty) return;
 
-    _translatingTitles = true;
+    if (mounted) setState(() => _translatingTitles = true);
     try {
-      final apiKey = await StorageService.instance.getApiKey();
+      final provider = await StorageService.instance.getAiProvider();
+      final apiKey = await StorageService.instance.getApiKeyFor(provider);
       if (apiKey == null || apiKey.isEmpty) return;
-      final translator = TranslationService(apiKey: apiKey);
+      final translator = TranslationService(apiKey: apiKey, provider: provider);
       var changed = false;
       for (final chapter in pending) {
-        _titleAttempts.add(chapter.seriesKey);
+        _titleAttempts.add(chapter.id);
         if (_needsTranslation(chapter.bookTitle, chapter.bookTitleEnglish)) {
           final english = await translator.translateTitle(chapter.bookTitle);
           if (english.isNotEmpty) {
@@ -84,7 +95,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     } catch (_) {
       // Titles stay in the source language until the next visit.
     } finally {
-      _translatingTitles = false;
+      if (mounted) setState(() => _translatingTitles = false);
     }
   }
 
@@ -122,13 +133,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
     _refresh();
   }
 
-  Future<void> _confirmDelete(Chapter chapter) async {
+  Future<bool> _confirmSeriesDeletion(Chapter chapter) async {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Remove from library?'),
         content: Text(
-          'This deletes the saved chapter for "${chapter.displayBookTitle}".',
+          'This deletes all saved chapters and the glossary for '
+          '"${chapter.displayBookTitle}".',
         ),
         actions: [
           TextButton(
@@ -143,7 +155,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
         ],
       ),
     );
-    if (confirmed != true) return;
+    return confirmed ?? false;
+  }
+
+  Future<void> _confirmDelete(Chapter chapter) async {
+    if (!await _confirmSeriesDeletion(chapter)) return;
     await _delete(chapter);
   }
 
@@ -180,24 +196,36 @@ class _LibraryScreenState extends State<LibraryScreen> {
       color: AppTheme.accent,
       backgroundColor: AppTheme.surface,
       onRefresh: () async => _refresh(),
-      child: ListView.separated(
-        padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
-        itemCount: _chapters.length,
-        separatorBuilder: (_, __) => const SizedBox(height: 10),
-        itemBuilder: (context, index) {
-          final chapter = _chapters[index];
-          return Dismissible(
-            key: ValueKey(chapter.seriesKey),
-            direction: DismissDirection.endToStart,
-            background: Container(
-              alignment: Alignment.centerRight,
-              padding: const EdgeInsets.only(right: 20),
-              decoration: BoxDecoration(
-                color: AppTheme.danger.withValues(alpha: 0.2),
-                borderRadius: BorderRadius.circular(14),
+      child: Column(
+        children: [
+          if (_translatingTitles)
+            LinearProgressIndicator(
+              minHeight: 2,
+              backgroundColor: AppTheme.surface,
+              valueColor: const AlwaysStoppedAnimation(AppTheme.accent),
+            ),
+          Expanded(
+            child: ListView.separated(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+              itemCount: _chapters.length,
+              separatorBuilder: (_, __) => const SizedBox(height: 10),
+              itemBuilder: (context, index) {
+                final chapter = _chapters[index];
+                return Dismissible(
+                  key: ValueKey(chapter.seriesKey),
+                  direction: DismissDirection.endToStart,
+                  background: Container(
+                    alignment: Alignment.centerRight,
+                    padding: const EdgeInsets.only(right: 20),
+                    decoration: BoxDecoration(
+                      color: AppTheme.danger.withValues(alpha: 0.2),
+                      borderRadius: BorderRadius.circular(14),
               ),
               child: const Icon(Icons.delete_outline, color: AppTheme.danger),
             ),
+            confirmDismiss: (_) async {
+              return _confirmSeriesDeletion(chapter);
+            },
             onDismissed: (_) => _delete(chapter),
             child: Material(
               color: AppTheme.surface,
@@ -268,6 +296,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
           );
         },
       ),
+            ),
+          ],
+        ),
     );
   }
 }

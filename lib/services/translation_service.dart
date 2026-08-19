@@ -42,7 +42,19 @@ class TranslationService {
   final Dio _dio;
   final CancelToken _cancelToken = CancelToken();
   late final TranslationEngine _engine;
+
+  /// Shared queue for translation tasks. Made static to serialize concurrent
+  /// translation attempts across all TranslationService instances and prevent
+  /// API rate limit errors. Each call to translateChapter() enqueues itself here.
   static Future<void> _translationQueue = Future<void>.value();
+
+  /// Cache of chapter/book title translations. Made static because title
+  /// translations (e.g., "朱雀" -> "Vermillion Bird") are deterministic
+  /// and consistent across chapters, novels, and sessions. Avoids redundant
+  /// API calls for common titles.
+  ///
+  /// Uses simple LRU eviction when cache size reaches 300 entries:
+  /// the oldest cached entry is removed and new entries are added at the end.
   static final Map<String, String> _titleCache = <String, String>{};
 
   static const int _glossarySampleChars = 12000;
@@ -78,7 +90,12 @@ class TranslationService {
     if (!RegExp(r'[^\x00-\x7F]').hasMatch(source)) return source;
 
     final cached = _titleCache[source];
-    if (cached != null) return cached;
+    if (cached != null) {
+      // Move to the end so it counts as recently used for LRU eviction.
+      _titleCache.remove(source);
+      _titleCache[source] = cached;
+      return cached;
+    }
 
     try {
       final response = await _dio.post<Map<String, dynamic>>(
@@ -112,7 +129,11 @@ class TranslationService {
               .trim() ??
           '';
       if (english.isEmpty || english.length > 120) return '';
-      if (_titleCache.length > 300) _titleCache.clear();
+      // LRU-style eviction: when cache reaches max size, remove the oldest entry
+      // instead of clearing everything.
+      if (_titleCache.length >= 300) {
+        _titleCache.remove(_titleCache.keys.first);
+      }
       _titleCache[source] = english;
       return english;
     } catch (_) {
@@ -211,7 +232,7 @@ class TranslationService {
     List<GlossaryEntry> Function()? glossary,
     int startFromChunk = 0,
     List<String> priorParts = const [],
-    void Function(int completedChunks, int total, String partialText)?
+    void Function(int completedChunks, int total, List<String> parts)?
         onChunkComplete,
   }) {
     return _enqueueTranslation(
@@ -250,7 +271,7 @@ class TranslationService {
     List<GlossaryEntry> Function()? glossary,
     int startFromChunk = 0,
     List<String> priorParts = const [],
-    void Function(int completedChunks, int total, String partialText)?
+    void Function(int completedChunks, int total, List<String> parts)?
         onChunkComplete,
   }) async {
     final chunks = _engine.chunkText(rawText);
@@ -291,9 +312,10 @@ class TranslationService {
         },
       );
       translatedParts.add(translated);
-      final joined = translatedParts.join('\n\n');
-      onProgress(i + 1, total, joined);
-      onChunkComplete?.call(i + 1, total, joined);
+      onProgress(i + 1, total, translatedParts.join('\n\n'));
+      // Hand back the real chunk boundaries — joining then re-splitting on
+      // '\n\n' is lossy because chunks themselves contain paragraph breaks.
+      onChunkComplete?.call(i + 1, total, List<String>.unmodifiable(translatedParts));
     }
 
     return translatedParts.join('\n\n');

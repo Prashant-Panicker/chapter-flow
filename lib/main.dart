@@ -55,6 +55,10 @@ class ChapterFlowApp extends StatelessWidget {
 /// Which root tab is showing. Exposed so a pushed screen can hand control
 /// back to the Browser tab — the WebView only exists there, so anything
 /// needing a live page has to go through it.
+///
+/// TODO: Consider scoping this to the RootShell widget tree (e.g., via
+/// InheritedWidget or Provider) instead of module-level global to reduce
+/// implicit coupling between screens.
 final ValueNotifier<int> rootTabIndex = ValueNotifier<int>(0);
 
 class RootShell extends StatefulWidget {
@@ -68,10 +72,12 @@ class RootShell extends StatefulWidget {
 
 class _RootShellState extends State<RootShell> {
   int get _index => rootTabIndex.value;
+  String? _startupError;
 
   @override
   void initState() {
     super.initState();
+    _startupError = widget.startupError;
     rootTabIndex.addListener(_onTabChanged);
   }
 
@@ -87,7 +93,7 @@ class _RootShellState extends State<RootShell> {
 
   @override
   Widget build(BuildContext context) {
-    if (widget.startupError != null) {
+    if (_startupError != null) {
       return Scaffold(
         backgroundColor: AppTheme.bg,
         body: Center(
@@ -99,15 +105,42 @@ class _RootShellState extends State<RootShell> {
                 const Icon(Icons.warning_amber_rounded, size: 48, color: AppTheme.accent),
                 const SizedBox(height: 12),
                 Text(
-                  'ChapterFlow started with a storage warning.',
+                  'Storage initialization failed.',
                   style: Theme.of(context).textTheme.titleMedium?.copyWith(color: AppTheme.textPrimary),
                   textAlign: TextAlign.center,
                 ),
                 const SizedBox(height: 8),
                 Text(
-                  widget.startupError!,
+                  _startupError!,
                   style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: AppTheme.textSecondary),
                   textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 20),
+                ElevatedButton.icon(
+                  onPressed: () async {
+                    // Attempt to reinitialize storage
+                    String? retryError;
+                    try {
+                      await StorageService.instance.init();
+                    } catch (error) {
+                      retryError = error.toString();
+                    }
+                    if (!mounted) return;
+                    setState(() => _startupError = retryError);
+                    if (retryError != null) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text('Retry failed: $retryError')),
+                      );
+                    }
+                  },
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('Retry'),
+                ),
+                const SizedBox(height: 8),
+                TextButton.icon(
+                  onPressed: () => setState(() => _startupError = null),
+                  icon: const Icon(Icons.arrow_forward),
+                  label: const Text('Continue anyway'),
                 ),
               ],
             ),
@@ -116,26 +149,28 @@ class _RootShellState extends State<RootShell> {
       );
     }
 
-    final Widget body;
-    switch (_index) {
-      case 0:
-        body = const BrowserScreen();
-        break;
-      case 1:
-        body = Scaffold(
-          appBar: AppBar(title: const Text('Library')),
-          body: const LibraryScreen(),
-        );
-        break;
-      default:
-        body = Scaffold(
-          appBar: AppBar(title: const Text('Settings')),
-          body: const SettingsScreen(),
-        );
-    }
-
     return Scaffold(
-      body: body,
+      body: Column(
+        children: [
+          if (!StorageService.instance.isInitialized) const _StorageWarning(),
+          Expanded(
+            child: IndexedStack(
+              index: _index,
+              children: [
+                const BrowserScreen(),
+                Scaffold(
+                  appBar: AppBar(title: const Text('Library')),
+                  body: const LibraryScreen(),
+                ),
+                Scaffold(
+                  appBar: AppBar(title: const Text('Settings')),
+                  body: const SettingsScreen(),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _index,
         onDestinationSelected: (i) => rootTabIndex.value = i,
@@ -156,6 +191,40 @@ class _RootShellState extends State<RootShell> {
             label: 'Settings',
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Shown after "Continue anyway": storage calls silently no-op, so the empty
+/// library and unsaved settings need an explanation.
+class _StorageWarning extends StatelessWidget {
+  const _StorageWarning();
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      bottom: false,
+      child: Container(
+        width: double.infinity,
+        color: AppTheme.danger.withValues(alpha: 0.18),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        child: Row(
+          children: [
+            const Icon(Icons.warning_amber_rounded,
+                size: 18, color: AppTheme.danger),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'Storage is unavailable — chapters and settings will not be saved.',
+                style: Theme.of(context)
+                    .textTheme
+                    .bodySmall
+                    ?.copyWith(color: AppTheme.textPrimary),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

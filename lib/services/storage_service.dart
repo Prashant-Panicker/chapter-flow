@@ -39,6 +39,10 @@ class StorageService {
   late Box<List<dynamic>> _glossaryBox;
   bool _initialized = false;
 
+  /// False when [init] failed and the user chose to continue anyway: every
+  /// chapter/glossary call below then no-ops instead of throwing.
+  bool get isInitialized => _initialized;
+
   Future<void> init() async {
     if (_initialized) return;
     await Hive.initFlutter();
@@ -50,13 +54,15 @@ class StorageService {
     }
     _chaptersBox = await Hive.openBox<Chapter>(_chaptersBoxName);
     _glossaryBox = await Hive.openBox<List<dynamic>>(_glossaryBoxName);
+    // Note: pruneAllSeries() is not called at startup to avoid silent data loss.
+    // Call it explicitly if you want to enforce the retention policy.
     _initialized = true;
-    await pruneAllSeries();
   }
 
   // ---------------- Glossary (key = series key) ----------------
 
   List<GlossaryEntry> glossaryFor(String seriesKey) {
+    if (!_initialized) return const [];
     final raw = _glossaryBox.get(seriesKey);
     if (raw == null || raw.isEmpty) return const [];
     return raw.whereType<GlossaryEntry>().toList(growable: false);
@@ -69,13 +75,17 @@ class StorageService {
   /// A second binding for the same term is accepted only when its [style]
   /// differs — that distinguishes a real homonym (a character *named* 朱雀 vs
   /// the 朱雀 species) from the model simply being inconsistent.
-  Future<void> mergeGlossary(
+  ///
+  /// Returns true if all [incoming] terms were added, or false if the glossary
+  /// reached its size limit ([_maxGlossaryEntries]) and some terms were rejected.
+  Future<bool> mergeGlossary(
     String seriesKey,
     List<GlossaryEntry> incoming,
   ) async {
-    if (incoming.isEmpty) return;
+    if (!_initialized) return false;
+    if (incoming.isEmpty) return true;
     final current = glossaryFor(seriesKey).toList();
-    if (current.length >= _maxGlossaryEntries) return;
+    if (current.length >= _maxGlossaryEntries) return false;
 
     final senses = <String, List<GlossaryEntry>>{};
     for (final entry in current) {
@@ -84,8 +94,12 @@ class StorageService {
     final pinned = current.map((e) => e.pinKey).toSet();
 
     var added = false;
+    var capacityExceeded = false;
     for (final entry in incoming) {
-      if (current.length >= _maxGlossaryEntries) break;
+      if (current.length >= _maxGlossaryEntries) {
+        capacityExceeded = true;
+        break;
+      }
       if (pinned.contains(entry.pinKey)) continue;
       final existing = senses[entry.source] ?? const <GlossaryEntry>[];
       if (existing.length >= _maxSensesPerTerm) continue;
@@ -96,21 +110,24 @@ class StorageService {
       senses.putIfAbsent(entry.source, () => []).add(entry);
       added = true;
     }
-    if (!added) return;
+    if (!added) return !capacityExceeded;
     await _glossaryBox.put(seriesKey, current);
+    return !capacityExceeded;
   }
 
   // ---------------- Chapters (key = chapter URL / id) ----------------
 
   Future<void> saveChapter(Chapter chapter) async {
+    if (!_initialized) return;
     await _chaptersBox.put(chapter.id, chapter);
   }
 
-  Chapter? getChapter(String url) => _chaptersBox.get(url);
+  Chapter? getChapter(String url) => _initialized ? _chaptersBox.get(url) : null;
 
   /// The library shows one entry per novel+site: the most recently read
   /// chapter of that series.
   List<Chapter> libraryEntries() {
+    if (!_initialized) return const [];
     final latest = <String, Chapter>{};
     for (final c in _chaptersBox.values) {
       final existing = latest[c.seriesKey];
@@ -123,23 +140,10 @@ class StorageService {
     return list;
   }
 
-  /// Drops every stored chapter of [seriesKey] except [keepIds], so a series
-  /// never keeps more than the window around the chapter being read.
-  Future<void> pruneSeries(
-    String seriesKey, {
-    required Set<String> keepIds,
-  }) async {
-    final stale = _chaptersBox.values
-        .where((c) => c.seriesKey == seriesKey && !keepIds.contains(c.id))
-        .map((c) => c.id)
-        .toList();
-    if (stale.isEmpty) return;
-    await _chaptersBox.deleteAll(stale);
-  }
-
   /// Applies the one-entry-per-series rule to everything already on disk,
   /// keeping each series' last read chapter plus the one before and after it.
   Future<void> pruneAllSeries() async {
+    if (!_initialized) return;
     final keep = <String>{};
     for (final entry in libraryEntries()) {
       keep.add(entry.id);
@@ -157,6 +161,7 @@ class StorageService {
   }
 
   Future<void> deleteSeries(String seriesKey) async {
+    if (!_initialized) return;
     final ids = _chaptersBox.values
         .where((c) => c.seriesKey == seriesKey)
         .map((c) => c.id)
@@ -170,6 +175,7 @@ class StorageService {
     String seriesKey,
     String englishTitle,
   ) async {
+    if (!_initialized) return;
     for (final c in _chaptersBox.values.toList()) {
       if (c.seriesKey != seriesKey || c.bookTitleEnglish == englishTitle) {
         continue;
@@ -183,6 +189,7 @@ class StorageService {
 
   /// Backfills the English chapter heading once it has been translated.
   Future<void> setChapterEnglishTitle(String id, String englishTitle) async {
+    if (!_initialized) return;
     final existing = _chaptersBox.get(id);
     if (existing == null || existing.chapterTitleEnglish == englishTitle) {
       return;
@@ -194,6 +201,7 @@ class StorageService {
   }
 
   Future<void> touchLastRead(String url) async {
+    if (!_initialized) return;
     final existing = _chaptersBox.get(url);
     if (existing == null) return;
     await _chaptersBox.put(
@@ -206,6 +214,7 @@ class StorageService {
   /// fraction rather than a pixel offset so it survives a font-size change
   /// or a rotation. No-ops for a chapter that was never saved.
   Future<void> saveReadingProgress(String url, double fraction) async {
+    if (!_initialized) return;
     final existing = _chaptersBox.get(url);
     if (existing == null) return;
     final clamped = fraction.clamp(0.0, 1.0);
