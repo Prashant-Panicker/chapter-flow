@@ -187,7 +187,9 @@ class TranslationService {
         '/chat/completions',
         cancelToken: _cancelToken,
         data: {
-          ..._modelParams(thinkingEnabled: true, maxTokens: 16000),
+          // Non-thinking: glossary is JSON extraction, not deep reasoning.
+          // Thinking mode can stall 30–120s before any translation stream starts.
+          ..._modelParams(thinkingEnabled: false, maxTokens: 4000),
           'messages': [
             {'role': 'system', 'content': kGlossarySystemPrompt},
             {'role': 'user', 'content': '$knownBlock$sample'},
