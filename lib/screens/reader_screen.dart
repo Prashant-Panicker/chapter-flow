@@ -46,10 +46,6 @@ class ReaderScreen extends StatefulWidget {
 
 class _ReaderScreenState extends State<ReaderScreen>
     with WidgetsBindingObserver {
-  static const _mobileChromeUA =
-      'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 '
-      '(KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36';
-
   late String _url;
   late String _pageTitle;
   late String _rawText;
@@ -70,39 +66,20 @@ class _ReaderScreenState extends State<ReaderScreen>
   bool _busy = false;
   bool _translating = false;
   bool _cancelRequested = false;
-  bool _prefetching = false;
-  bool _prefetchCancelRequested = false;
   bool _appInBackground = false;
   bool _resumeTranslation = false;
-  bool _prefetchHandoff = false;
-  String? _prefetchUrl;
-  Future<void>? _prefetchFuture;
   TranslationService? _activeTranslator;
-  TranslationService? _prefetchTranslator;
-  Completer<Map<String, dynamic>>? _prefetchExtractionCompleter;
-  HeadlessInAppWebView? _prefetchWebView;
   Timer? _translationUiTimer;
-  String? _pendingTranslatedText;
-  int _pendingChunkCurrent = 0;
-  int _pendingChunkTotal = 0;
-  int _continuousChangeId = 0;
   int _chunkCurrent = 0;
   int _chunkTotal = 0;
   double _fontSize = StorageService.defaultFontSize;
   List<String> _completedParts = [];
-  String _prefetchPartialText = '';
-  int _prefetchChunkCurrent = 0;
-  int _prefetchChunkTotal = 0;
-  List<String> _prefetchCompletedParts = [];
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _cancelRequested = true;
-    _prefetchCancelRequested = true;
     _activeTranslator?.cancel();
-    _prefetchTranslator?.cancel();
-    _prefetchWebView?.dispose();
     _translationUiTimer?.cancel();
     _persistProgress();
     _scrollController.dispose();
@@ -138,21 +115,11 @@ class _ReaderScreenState extends State<ReaderScreen>
     _persistProgress();
     if (state == AppLifecycleState.detached) {
       _appInBackground = true;
-      if (_translating && !_prefetchHandoff) {
+      if (_translating) {
         _resumeTranslation = true;
         _cancelRequested = true;
         _activeTranslator?.cancel();
       }
-      if (_prefetching) {
-        if (_prefetchHandoff) _resumeTranslation = true;
-        _prefetchCancelRequested = true;
-        _prefetchTranslator?.cancel();
-      }
-      final extraction = _prefetchExtractionCompleter;
-      if (extraction != null && !extraction.isCompleted) {
-        extraction.completeError(TranslationCancelledException());
-      }
-      _prefetchWebView?.dispose();
     }
   }
 
@@ -161,13 +128,6 @@ class _ReaderScreenState extends State<ReaderScreen>
     if (_resumeTranslation && !_translating) {
       _resumeTranslation = false;
       _startTranslation(force: true, keepCheckpoint: true);
-      return;
-    }
-    if (_continuousEnabled &&
-        _translatedText.isNotEmpty &&
-        !_translating &&
-        !_prefetching) {
-      _prefetchFuture = _prefetchNextChapter();
     }
   }
 
@@ -199,8 +159,6 @@ class _ReaderScreenState extends State<ReaderScreen>
     if (_continuousEnabled &&
         (cached == null || !cached.isFullyTranslated)) {
       await _startTranslation(keepCheckpoint: true);
-    } else if (_continuousEnabled) {
-      _prefetchFuture = _prefetchNextChapter();
     }
   }
 
@@ -231,8 +189,10 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
   }
 
-  // --- Temporary stubs; full implementations being restored ---
-  Future<void> _startTranslation({bool force = false, bool keepCheckpoint = false}) async {
+  Future<void> _startTranslation({
+    bool force = false,
+    bool keepCheckpoint = false,
+  }) async {
     final translator = await _buildTranslator();
     if (translator == null || !mounted) return;
     _activeTranslator = translator;
@@ -310,9 +270,6 @@ class _ReaderScreenState extends State<ReaderScreen>
     return _sourceChapterTitle.isEmpty ? 'Chapter' : _sourceChapterTitle;
   }
 
-  String get _seriesKey =>
-      Chapter.seriesKeyFor(Uri.tryParse(_url)?.host ?? '', _sourceBookTitle);
-
   Future<void> _resolveEnglishTitles() async {
     final translator = await _buildTranslator(showMissingKeyMessage: false);
     if (translator == null) return;
@@ -354,10 +311,6 @@ class _ReaderScreenState extends State<ReaderScreen>
         completedSourceChunks: checkpointChunks,
       ),
     );
-  }
-
-  Future<void> _prefetchNextChapter() async {
-    // Prefetch restored in follow-up; continuous mode still translates current.
   }
 
   Future<void> _navigate(String targetUrl) async {
@@ -442,14 +395,6 @@ class _ReaderScreenState extends State<ReaderScreen>
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(message)),
     );
-  }
-
-  void _scrollToTop() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && _scrollController.hasClients) {
-        _scrollController.jumpTo(0);
-      }
-    });
   }
 
   void _restoreProgress(double fraction) {
