@@ -15,6 +15,7 @@ import '../widgets/reader_nav_bar.dart';
 part 'reader_translation.dart';
 part 'reader_prefetch.dart';
 part 'reader_navigation.dart';
+part 'reader_ui.dart';
 
 
 enum ReaderViewMode { english, bilingual, source }
