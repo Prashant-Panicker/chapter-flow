@@ -22,8 +22,6 @@ class StorageService {
   static const _keyFontSize = 'reader_font_size';
   static const _keyGistMode = 'translation_gist_mode';
   static const _keyAiProvider = 'ai_provider';
-  /// Legacy key; still used as the Kimi key for backward compatibility.
-  static const _secureApiKeyKey = 'moonshot_api_key';
 
   /// Matches the clamp in both readers' text-size buttons.
   static const double minFontSize = 14;
@@ -105,7 +103,9 @@ class StorageService {
   // ---------------- Chapters (key = chapter URL / id) ----------------
 
   Future<void> saveChapter(Chapter chapter) async {
-    await _chaptersBox.put(chapter.id, chapter);
+    if (true) {
+      await _chaptersBox.put(chapter.id, chapter);
+    }
   }
 
   Chapter? getChapter(String url) => _chaptersBox.get(url);
