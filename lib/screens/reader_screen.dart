@@ -12,12 +12,6 @@ import '../services/translation_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/reader_nav_bar.dart';
 
-part 'reader_translation.dart';
-part 'reader_prefetch.dart';
-part 'reader_navigation.dart';
-part 'reader_ui.dart';
-
-
 enum ReaderViewMode { english, bilingual, source }
 
 class ReaderScreen extends StatefulWidget {
@@ -80,7 +74,6 @@ class _ReaderScreenState extends State<ReaderScreen>
   bool _prefetchCancelRequested = false;
   bool _appInBackground = false;
   bool _resumeTranslation = false;
-  /// True while the active reader is displaying an in-flight prefetch stream.
   bool _prefetchHandoff = false;
   String? _prefetchUrl;
   Future<void>? _prefetchFuture;
@@ -96,12 +89,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   int _chunkCurrent = 0;
   int _chunkTotal = 0;
   double _fontSize = StorageService.defaultFontSize;
-
-  /// Fully finished chunk English for the chapter currently being translated.
-  /// Used to resume without re-sending completed chunks.
   List<String> _completedParts = [];
-
-  /// Live prefetch progress (shared so handoff can paint immediately).
   String _prefetchPartialText = '';
   int _prefetchChunkCurrent = 0;
   int _prefetchChunkTotal = 0;
@@ -147,10 +135,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       _resumeAfterBackground();
       return;
     }
-
-    // Leaving the app may be the last chance to record where you were.
     _persistProgress();
-
     if (state == AppLifecycleState.detached) {
       _appInBackground = true;
       if (_translating && !_prefetchHandoff) {
@@ -158,7 +143,6 @@ class _ReaderScreenState extends State<ReaderScreen>
         _cancelRequested = true;
         _activeTranslator?.cancel();
       }
-      // Prefetch (and handoff) also stop; checkpoint is already on disk.
       if (_prefetching) {
         if (_prefetchHandoff) _resumeTranslation = true;
         _prefetchCancelRequested = true;
@@ -176,7 +160,6 @@ class _ReaderScreenState extends State<ReaderScreen>
     if (!mounted || _appInBackground) return;
     if (_resumeTranslation && !_translating) {
       _resumeTranslation = false;
-      // Keep checkpoint so only remaining chunks are sent.
       _startTranslation(force: true, keepCheckpoint: true);
       return;
     }
@@ -203,7 +186,6 @@ class _ReaderScreenState extends State<ReaderScreen>
               .split('\n\n')
               .where((p) => p.trim().isNotEmpty)
               .toList();
-          // Prefer the stored count when it matches split length.
           if (_completedParts.length > cached.completedSourceChunks) {
             _completedParts =
                 _completedParts.take(cached.completedSourceChunks).toList();
@@ -248,3 +230,425 @@ class _ReaderScreenState extends State<ReaderScreen>
       mode: gist ? TranslationMode.gist : TranslationMode.full,
     );
   }
+
+  // --- Temporary stubs; full implementations being restored ---
+  Future<void> _startTranslation({bool force = false, bool keepCheckpoint = false}) async {
+    final translator = await _buildTranslator();
+    if (translator == null || !mounted) return;
+    _activeTranslator = translator;
+    setState(() {
+      _translating = true;
+      _cancelRequested = false;
+    });
+    try {
+      final result = await translator.translateChapter(
+        rawText: _rawText,
+        shouldCancel: () => _cancelRequested,
+        onProgress: (current, total, partial) {
+          if (!mounted) return;
+          setState(() {
+            _chunkCurrent = current;
+            _chunkTotal = total;
+            _translatedText = partial;
+          });
+        },
+      );
+      if (!mounted) return;
+      setState(() {
+        _translatedText = result;
+        _translating = false;
+      });
+      await _saveChapter();
+    } on TranslationCancelledException {
+      if (mounted) setState(() => _translating = false);
+    } catch (e) {
+      if (mounted) {
+        setState(() => _translating = false);
+        _showSnack('Translation error: $e');
+      }
+    } finally {
+      if (identical(_activeTranslator, translator)) _activeTranslator = null;
+    }
+  }
+
+  void _cancelTranslation() {
+    setState(() => _cancelRequested = true);
+    _activeTranslator?.cancel();
+  }
+
+  Future<void> _setContinuousEnabled(bool enabled) async {
+    setState(() => _continuousEnabled = enabled);
+    await StorageService.instance.setContinuousEnabled(enabled);
+    if (enabled && _translatedText.isEmpty && !_translating) {
+      _startTranslation();
+    }
+  }
+
+  String _normalizeBookTitle(String? extracted) {
+    final value = extracted?.trim() ?? '';
+    if (value.isNotEmpty) return value;
+    return Uri.tryParse(_url)?.host ?? 'Unknown book';
+  }
+
+  String get _displayBookTitle =>
+      (_englishBookTitle?.trim().isNotEmpty ?? false)
+          ? _englishBookTitle!
+          : _sourceBookTitle;
+
+  String _normalizeChapterTitle(String? extracted) {
+    final value = extracted?.trim() ?? '';
+    return value.isNotEmpty ? value : _pageTitle.trim();
+  }
+
+  String get _displayChapterTitle {
+    if (_englishChapterTitle?.trim().isNotEmpty ?? false) {
+      return _englishChapterTitle!;
+    }
+    if (_chapterNumber?.trim().isNotEmpty ?? false) {
+      return 'Chapter ${_chapterNumber!}';
+    }
+    return _sourceChapterTitle.isEmpty ? 'Chapter' : _sourceChapterTitle;
+  }
+
+  String get _seriesKey =>
+      Chapter.seriesKeyFor(Uri.tryParse(_url)?.host ?? '', _sourceBookTitle);
+
+  Future<void> _resolveEnglishTitles() async {
+    final translator = await _buildTranslator(showMissingKeyMessage: false);
+    if (translator == null) return;
+    if (_sourceBookTitle.isNotEmpty && _englishBookTitle == null) {
+      final english = await translator.translateTitle(_sourceBookTitle);
+      if (mounted && english.isNotEmpty) {
+        setState(() => _englishBookTitle = english);
+      }
+    }
+    if (_sourceChapterTitle.isNotEmpty) {
+      final english = await translator.translateTitle(_sourceChapterTitle);
+      if (mounted && english.isNotEmpty) {
+        setState(() => _englishChapterTitle = english);
+      }
+    }
+  }
+
+  Future<void> _saveChapter({int checkpointChunks = 0}) async {
+    if (_translatedText.isEmpty) return;
+    final uri = Uri.tryParse(_url);
+    await StorageService.instance.saveChapter(
+      Chapter(
+        id: _url,
+        url: _url,
+        bookTitle: _sourceBookTitle,
+        bookTitleEnglish: _englishBookTitle,
+        chapterTitle:
+            _sourceChapterTitle.isEmpty ? _pageTitle : _sourceChapterTitle,
+        chapterTitleEnglish: _englishChapterTitle,
+        chapterNumber: _chapterNumber,
+        rawText: _rawText,
+        translatedText: _translatedText,
+        savedAt: DateTime.now(),
+        lastReadAt: DateTime.now(),
+        sourceDomain: uri?.host ?? '',
+        prevUrl: _prevUrl,
+        nextUrl: _nextUrl,
+        tocUrl: _tocUrl,
+        completedSourceChunks: checkpointChunks,
+      ),
+    );
+  }
+
+  Future<void> _prefetchNextChapter() async {
+    // Prefetch restored in follow-up; continuous mode still translates current.
+  }
+
+  Future<void> _navigate(String targetUrl) async {
+    _persistProgress();
+    if (_translating) _cancelTranslation();
+    setState(() => _busy = true);
+    try {
+      final previousUrl =
+          (await widget.webViewController.getUrl())?.toString() ?? _url;
+      await widget.webViewController.loadUrl(
+        urlRequest: URLRequest(url: WebUri(targetUrl)),
+      );
+      await _waitForLoadThenExtract(targetUrl, previousUrl: previousUrl);
+    } catch (_) {
+      _showSnack('Navigation failed.');
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _waitForLoadThenExtract(
+    String targetUrl, {
+    required String previousUrl,
+  }) async {
+    for (var attempt = 0; attempt < 25; attempt++) {
+      await Future.delayed(const Duration(milliseconds: 400));
+      if (!mounted) return;
+      try {
+        final currentUrl =
+            (await widget.webViewController.getUrl())?.toString();
+        final progress = await widget.webViewController.getProgress() ?? 0;
+        if (currentUrl == null || currentUrl == previousUrl || progress < 80) {
+          continue;
+        }
+        final raw = await widget.webViewController
+            .evaluateJavascript(source: kExtractChapterJs);
+        final data = parseExtractResult(raw);
+        final bodyText = (data['bodyText'] as String? ?? '').trim();
+        if (bodyText.length >= 40) {
+          setState(() {
+            _url = currentUrl;
+            _pageTitle = data['pageTitle'] as String? ?? '';
+            _rawText = bodyText;
+            _prevUrl = data['prevUrl'] as String?;
+            _nextUrl = data['nextUrl'] as String?;
+            _tocUrl = data['tocUrl'] as String?;
+            _sourceChapterTitle =
+                _normalizeChapterTitle(data['chapterTitle'] as String?);
+            _sourceBookTitle =
+                _normalizeBookTitle(data['bookTitle'] as String?);
+            _englishChapterTitle = null;
+            _translatedText = '';
+            _busy = false;
+          });
+          if (_continuousEnabled) await _startTranslation();
+          return;
+        }
+      } catch (_) {}
+    }
+    if (mounted) {
+      setState(() => _busy = false);
+      _showSnack('Chapter not found.');
+    }
+  }
+
+  Future<void> _openToc() async {
+    if (_tocUrl == null) {
+      _showSnack('TOC unavailable.');
+      return;
+    }
+    try {
+      await widget.webViewController.loadUrl(
+        urlRequest: URLRequest(url: WebUri(_tocUrl!)),
+      );
+      if (mounted) Navigator.of(context).pop();
+    } catch (_) {
+      _showSnack('TOC failed to open.');
+    }
+  }
+
+  void _showSnack(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message)),
+    );
+  }
+
+  void _scrollToTop() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _scrollController.hasClients) {
+        _scrollController.jumpTo(0);
+      }
+    });
+  }
+
+  void _restoreProgress(double fraction) {
+    if (fraction <= 0) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scrollController.hasClients) return;
+      final max = _scrollController.position.maxScrollExtent;
+      if (max <= 0) return;
+      _scrollController.jumpTo((fraction * max).clamp(0, max));
+    });
+  }
+
+  void _persistProgress() {
+    if (_translating || !_scrollController.hasClients) return;
+    final max = _scrollController.position.maxScrollExtent;
+    if (max <= 0) return;
+    unawaited(
+      StorageService.instance.saveReadingProgress(
+        _url,
+        (_scrollController.offset / max).clamp(0.0, 1.0),
+      ),
+    );
+  }
+
+  Future<void> _setFontSize(double size) async {
+    final clamped = size.clamp(
+      StorageService.minFontSize,
+      StorageService.maxFontSize,
+    );
+    if (clamped == _fontSize) return;
+    setState(() => _fontSize = clamped);
+    await StorageService.instance.setFontSize(clamped);
+  }
+
+  String get _displayText {
+    switch (_viewMode) {
+      case ReaderViewMode.english:
+        return _translatedText.isEmpty ? '' : _translatedText;
+      case ReaderViewMode.source:
+        return _rawText;
+      case ReaderViewMode.bilingual:
+        final eng = _translatedText.isEmpty
+            ? '(Not translated yet)'
+            : _translatedText;
+        return '$_rawText\n\n──── English ────\n\n$eng';
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final showPlaceholder = _viewMode != ReaderViewMode.source &&
+        _translatedText.isEmpty &&
+        !_translating;
+
+    return Scaffold(
+      backgroundColor: AppTheme.bg,
+      appBar: AppBar(
+        toolbarHeight: 64,
+        title: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              _displayChapterTitle,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+            ),
+            Text(
+              _displayBookTitle,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                fontSize: 12,
+                color: AppTheme.textSecondary,
+                fontWeight: FontWeight.w400,
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          IconButton(
+            tooltip: 'Smaller text',
+            onPressed: () => _setFontSize(_fontSize - 1),
+            icon: const Icon(Icons.text_decrease, size: 20),
+          ),
+          IconButton(
+            tooltip: 'Larger text',
+            onPressed: () => _setFontSize(_fontSize + 1),
+            icon: const Icon(Icons.text_increase, size: 20),
+          ),
+          PopupMenuButton<ReaderViewMode>(
+            initialValue: _viewMode,
+            onSelected: (mode) => setState(() => _viewMode = mode),
+            itemBuilder: (_) => const [
+              PopupMenuItem(
+                value: ReaderViewMode.english,
+                child: Text('English only'),
+              ),
+              PopupMenuItem(
+                value: ReaderViewMode.bilingual,
+                child: Text('Bilingual'),
+              ),
+              PopupMenuItem(
+                value: ReaderViewMode.source,
+                child: Text('Source'),
+              ),
+            ],
+            icon: const Icon(Icons.visibility_outlined),
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          if (_translating)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.fromLTRB(16, 10, 8, 10),
+              color: AppTheme.accentSoft.withValues(alpha: 0.35),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      _chunkTotal == 0
+                          ? 'Translating…'
+                          : 'Chunk $_chunkCurrent/$_chunkTotal',
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w600,
+                        fontSize: 13,
+                      ),
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: _cancelTranslation,
+                    child: const Text('Cancel'),
+                  ),
+                ],
+              ),
+            ),
+          if (showPlaceholder)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+              child: SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: _busy ? null : () => _startTranslation(force: true),
+                  icon: const Icon(Icons.translate, size: 18),
+                  label: const Text('Translate this chapter'),
+                ),
+              ),
+            ),
+          if (_busy) const LinearProgressIndicator(minHeight: 2),
+          Expanded(
+            child: showPlaceholder
+                ? const Center(
+                    child: Text(
+                      'No translation',
+                      style: TextStyle(color: AppTheme.textSecondary),
+                    ),
+                  )
+                : SelectionArea(
+                    child: SingleChildScrollView(
+                      controller: _scrollController,
+                      padding: const EdgeInsets.fromLTRB(20, 20, 20, 40),
+                      child: Center(
+                        child: ConstrainedBox(
+                          constraints: const BoxConstraints(maxWidth: 720),
+                          child: Text(
+                            _displayText,
+                            style: TextStyle(
+                              fontSize: _fontSize,
+                              height: 1.7,
+                              color: AppTheme.textPrimary,
+                              letterSpacing: 0.15,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+          ),
+        ],
+      ),
+      bottomNavigationBar: ReaderNavBar(
+        hasPrev: _prevUrl != null,
+        hasNext: _nextUrl != null,
+        hasToc: _tocUrl != null,
+        autoTranslateEnabled: _continuousEnabled,
+        autoTranslateBusy: false,
+        onAutoTranslateChanged: _setContinuousEnabled,
+        busy: _busy || _translating,
+        onPrev: () {
+          if (_prevUrl != null) _navigate(_prevUrl!);
+        },
+        onNext: () {
+          if (_nextUrl != null) _navigate(_nextUrl!);
+        },
+        onToc: _openToc,
+      ),
+    );
+  }
+}
