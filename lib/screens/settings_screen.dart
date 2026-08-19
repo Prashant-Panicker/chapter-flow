@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
+import '../services/ai_provider.dart';
 import '../services/storage_service.dart';
 import '../services/translation_service.dart';
 import '../theme/app_theme.dart';
@@ -19,12 +20,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _saving = false;
   String _savedKey = '';
   bool _gistMode = false;
+  AiProvider _provider = AiProvider.kimi;
 
   @override
   void initState() {
     super.initState();
-    _loadKey();
-    _loadGistMode();
+    _loadAll();
   }
 
   @override
@@ -33,10 +34,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
     super.dispose();
   }
 
-  Future<void> _loadKey() async {
-    final key = await StorageService.instance.getApiKey();
+  Future<void> _loadAll() async {
+    final provider = await StorageService.instance.getAiProvider();
+    final key = await StorageService.instance.getApiKeyFor(provider);
+    final gist = await StorageService.instance.getGistMode();
     if (!mounted) return;
     setState(() {
+      _provider = provider;
+      _hasKey = key != null && key.isNotEmpty;
+      _savedKey = key ?? '';
+      _controller.text = key ?? '';
+      _gistMode = gist;
+    });
+  }
+
+  Future<void> _switchProvider(AiProvider next) async {
+    if (next == _provider) return;
+    await StorageService.instance.setAiProvider(next);
+    final key = await StorageService.instance.getApiKeyFor(next);
+    if (!mounted) return;
+    setState(() {
+      _provider = next;
       _hasKey = key != null && key.isNotEmpty;
       _savedKey = key ?? '';
       _controller.text = key ?? '';
@@ -51,14 +69,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
     setState(() => _saving = true);
     try {
-      await TranslationService(apiKey: value).validateApiKey();
-      await StorageService.instance.setApiKey(value);
+      await TranslationService(
+        apiKey: value,
+        provider: _provider,
+      ).validateApiKey();
+      await StorageService.instance.setApiKeyFor(_provider, value);
       if (!mounted) return;
       setState(() {
         _hasKey = true;
         _savedKey = value;
       });
-      _showSnack('API key saved.');
+      _showSnack('API key saved for ${_provider.displayName}.');
     } on ApiKeyValidationException catch (e) {
       _showSnack(e.message);
     } catch (e) {
@@ -70,7 +91,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _clearKey() async {
     try {
-      await StorageService.instance.clearApiKey();
+      await StorageService.instance.clearApiKeyFor(_provider);
       if (!mounted) return;
       setState(() {
         _hasKey = false;
@@ -81,12 +102,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     } catch (_) {
       _showSnack('Could not remove key.');
     }
-  }
-
-  Future<void> _loadGistMode() async {
-    final enabled = await StorageService.instance.getGistMode();
-    if (!mounted) return;
-    setState(() => _gistMode = enabled);
   }
 
   Future<void> _setGistMode(bool value) async {
@@ -137,6 +152,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
+  String get _keyHint {
+    switch (_provider) {
+      case AiProvider.kimi:
+        return 'sk-… (Moonshot)';
+      case AiProvider.deepseekV4Flash:
+        return 'sk-… (DeepSeek)';
+    }
+  }
+
+  String get _providerHelp {
+    switch (_provider) {
+      case AiProvider.kimi:
+        return 'Get a key at platform.moonshot.cn. Model: kimi-k2.6.';
+      case AiProvider.deepseekV4Flash:
+        return 'Get a key at platform.deepseek.com. Model: deepseek-v4-flash.';
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final showingSavedKey =
@@ -146,7 +179,45 @@ class _SettingsScreenState extends State<SettingsScreen> {
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
       children: [
         _sectionCard(
-          title: 'Moonshot (Kimi) API key',
+          title: 'AI model',
+          children: [
+            const Text(
+              'Switch between providers. Each keeps its own API key.',
+              style: TextStyle(color: AppTheme.textSecondary, height: 1.4),
+            ),
+            const SizedBox(height: 12),
+            SegmentedButton<AiProvider>(
+              segments: const [
+                ButtonSegment(
+                  value: AiProvider.kimi,
+                  label: Text('Kimi'),
+                  icon: Icon(Icons.auto_awesome, size: 16),
+                ),
+                ButtonSegment(
+                  value: AiProvider.deepseekV4Flash,
+                  label: Text('DeepSeek V4 Flash'),
+                  icon: Icon(Icons.bolt, size: 16),
+                ),
+              ],
+              selected: {_provider},
+              onSelectionChanged: (set) {
+                if (set.isNotEmpty) _switchProvider(set.first);
+              },
+            ),
+            const SizedBox(height: 8),
+            Text(
+              _providerHelp,
+              style: const TextStyle(
+                color: AppTheme.textSecondary,
+                fontSize: 12,
+                height: 1.3,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        _sectionCard(
+          title: '${_provider.displayName} API key',
           children: [
             const Text(
               'Encrypted on this device.',
@@ -159,10 +230,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
               onChanged: (_) => setState(() {}),
               style: const TextStyle(color: AppTheme.textPrimary),
               decoration: InputDecoration(
-                hintText: 'sk-…',
+                hintText: _keyHint,
                 suffixIcon: IconButton(
                   icon: Icon(
-                    _obscure ? Icons.visibility_outlined : Icons.visibility_off_outlined,
+                    _obscure
+                        ? Icons.visibility_outlined
+                        : Icons.visibility_off_outlined,
                     color: AppTheme.textSecondary,
                   ),
                   onPressed: () => setState(() => _obscure = !_obscure),
@@ -227,8 +300,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 style: TextStyle(color: AppTheme.textPrimary, fontSize: 15),
               ),
               subtitle: Text(
-                _gistMode ? 'On — shorter narrative output' : 'Off — full translation',
-                style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+                _gistMode
+                    ? 'On — shorter narrative output'
+                    : 'Off — full translation',
+                style: const TextStyle(
+                  color: AppTheme.textSecondary,
+                  fontSize: 12,
+                ),
               ),
               value: _gistMode,
               onChanged: _setGistMode,
