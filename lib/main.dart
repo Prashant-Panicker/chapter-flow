@@ -118,7 +118,7 @@ class _RootShellState extends State<RootShell> {
                 const SizedBox(height: 20),
                 ElevatedButton.icon(
                   onPressed: () async {
-                    // Attempt to reinitialize storage
+                    final messenger = ScaffoldMessenger.of(context);
                     String? retryError;
                     try {
                       await StorageService.instance.init();
@@ -128,7 +128,7 @@ class _RootShellState extends State<RootShell> {
                     if (!mounted) return;
                     setState(() => _startupError = retryError);
                     if (retryError != null) {
-                      ScaffoldMessenger.of(context).showSnackBar(
+                      messenger.showSnackBar(
                         SnackBar(content: Text('Retry failed: $retryError')),
                       );
                     }

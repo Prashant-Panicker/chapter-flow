@@ -435,6 +435,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
           style: const TextStyle(fontWeight: FontWeight.w700),
         ),
       ),
+      ),
     );
   }
 }
