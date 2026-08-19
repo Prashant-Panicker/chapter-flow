@@ -281,4 +281,3 @@ class TranslationService {
     }
     return buffer.toString();
   }
-}
