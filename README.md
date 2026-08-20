@@ -83,3 +83,5 @@ deleted only when you delete the novel.
 A reading aid, nothing more. ChapterFlow does not automate logins or
 CAPTCHAs and does not bulk-download or scrape sites — it translates the page
 you are on. Translations are machine-generated and will not be perfect.
+
+<!-- GitHub connector write test -->
